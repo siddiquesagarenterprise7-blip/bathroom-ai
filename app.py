@@ -1,216 +1,163 @@
-import streamlit as st, os, glob, hashlib, sqlite3, shutil
-from datetime import datetime
+import streamlit as st, os, glob, hashlib, sqlite3, base64
+import fitz
 
-# ========== CONFIG ==========
 st.set_page_config(page_title="Product and price finder", layout="wide", page_icon="🔍")
 ADMIN_EMAIL = "siddique.sagarenterprise7@gmail.com"
 ADMIN_PASS = "Sagar@2026"
 PDF_FOLDER = "files"
 DB_PATH = "users.db"
-IMAGE_FOLDER = "extracted_images"
-
 os.makedirs(PDF_FOLDER, exist_ok=True)
-os.makedirs(IMAGE_FOLDER, exist_ok=True)
 
-def hash_pw(pw):
-    return hashlib.sha256(pw.encode()).hexdigest()
+def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
+def get_pdfs(): return sorted(glob.glob(os.path.join(PDF_FOLDER, "*.pdf")))
 
-def get_pdfs():
-    return sorted(glob.glob(os.path.join(PDF_FOLDER, "*.pdf")))
+# DB
+conn=sqlite3.connect(DB_PATH)
+conn.execute('CREATE TABLE IF NOT EXISTS users (email TEXT PRIMARY KEY, name TEXT, mobile TEXT, password TEXT, status TEXT, allowed_files TEXT)')
+conn.execute("DELETE FROM users WHERE email=?", (ADMIN_EMAIL.lower(),))
+conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?)",(ADMIN_EMAIL.lower(),"Siddique Admin","9840830500",hash_pw(ADMIN_PASS),"approved",""))
+conn.commit(); conn.close()
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (email TEXT PRIMARY KEY, name TEXT, mobile TEXT, city TEXT, state TEXT, pincode TEXT, company TEXT, password TEXT, status TEXT, allowed_files TEXT, created_at TEXT)''')
-    # Force reset admin to Sagar@2026 every time
-    c.execute("DELETE FROM users WHERE lower(email)=?", (ADMIN_EMAIL.lower(),))
-    c.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-              (ADMIN_EMAIL.lower(), "Siddique Admin", "9840830500", "Chennai", "TN", "600000", "Sagar Enterprise",
-               hash_pw(ADMIN_PASS), "approved", "", datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+if "user" not in st.session_state: st.session_state.user=None
+if "view_file" not in st.session_state: st.session_state.view_file=None
 
-init_db()
+def login(e,p):
+    c=sqlite3.connect(DB_PATH)
+    r=c.execute("SELECT * FROM users WHERE email=? AND password=?",(e.lower(),hash_pw(p))).fetchone()
+    c.close()
+    if not r: return None
+    return {"email":r[0],"name":r[1],"is_admin":r[0]==ADMIN_EMAIL.lower()}
 
-def login_user(email, pw):
-    email = email.strip().lower()
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE email=? AND password=?", (email, hash_pw(pw)))
-    r = c.fetchone()
-    conn.close()
-    if not r:
-        return None, "Wrong email/password"
-    if r[8] == "pending":
-        return None, "Pending approval. Call 9840830500"
-    if r[8] == "blocked":
-        return None, "Blocked. Call owner"
-    return {"email": r[0], "name": r[1], "is_admin": r[0] == ADMIN_EMAIL.lower(), "allowed_files": r[9].split(",") if r[9] else []}, "ok"
-
-if "user" not in st.session_state:
-    st.session_state.user = None
-
-# ========== LOGIN PAGE ==========
 if not st.session_state.user:
     st.title("🔍 Product and price finder")
-    st.caption("Sagar Enterprise - Chennai")
-    t1, t2 = st.tabs(["🔐 Login", "📝 Customer Signup"])
-    with t1:
-        e = st.text_input("Email")
-        p = st.text_input("Password", type="password")
-        if st.button("Login", use_container_width=True, type="primary"):
-            u, msg = login_user(e, p)
-            if u:
-                st.session_state.user = u
-                st.rerun()
-            else:
-                st.error(msg)
-    with t2:
-        st.info("Customer signup - needs admin approval")
-        name = st.text_input("Full Name")
-        mob = st.text_input("Mobile")
-        email_s = st.text_input("New Email")
-        city = st.text_input("City")
-        pw_s = st.text_input("Set Password", type="password")
-        if st.button("Request Approval", use_container_width=True):
-            if not email_s or not pw_s:
-                st.error("Email & Password required")
-            else:
-                conn = sqlite3.connect(DB_PATH)
-                try:
-                    conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                                 (email_s.lower(), name, mob, city, "TN", "600000", "", hash_pw(pw_s), "pending", "", datetime.now().isoformat()))
-                    conn.commit()
-                    st.success("Sent for approval. Call 9840830500")
-                except:
-                    st.error("Email already exists")
-                conn.close()
-
-# ========== MAIN APP ==========
+    st.caption("Sagar Enterprise - Login: siddique.sagarenterprise7@gmail.com / Sagar@2026")
+    e=st.text_input("Email", value="siddique.sagarenterprise7@gmail.com")
+    p=st.text_input("Password", type="password", value="Sagar@2026")
+    if st.button("Login", type="primary", use_container_width=True):
+        u=login(e,p)
+        if u: st.session_state.user=u; st.rerun()
+        else: st.error("Wrong password")
 else:
-    u = st.session_state.user
+    u=st.session_state.user
+    # SIDEBAR
     st.sidebar.title("🔍 Product and price finder")
     st.sidebar.write(f"👋 {u['name']}")
-    st.sidebar.write(f"📧 {u['email']}")
-
+    st.sidebar.write(f"{ADMIN_EMAIL}")
     st.sidebar.divider()
-    st.sidebar.subheader("🧹 Maintenance")
-    c_a, c_b = st.sidebar.columns(2)
-    with c_a:
-        if st.button("🔄 Refresh", use_container_width=True):
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            st.rerun()
-    with c_b:
-        if st.button("🗑️ Clear Cache", use_container_width=True):
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            if os.path.exists(IMAGE_FOLDER):
-                shutil.rmtree(IMAGE_FOLDER)
-                os.makedirs(IMAGE_FOLDER, exist_ok=True)
-            st.toast("Cache Cleared!", icon="✅")
-            st.rerun()
-
+    if st.sidebar.button("🔄 Refresh", use_container_width=True): st.rerun()
+    if st.sidebar.button("🗑️ Clear Cache", use_container_width=True):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.sidebar.success("Cleared!")
+        st.rerun()
     if st.sidebar.button("🚪 Logout", use_container_width=True):
-        st.session_state.user = None
+        st.session_state.user=None
+        st.session_state.view_file=None
         st.rerun()
 
-    # --- ADMIN PANEL ---
-    if u["is_admin"]:
-        st.title("👑 Product and price finder - Admin Panel")
+    st.title("👑 Product and price finder - Admin")
+    st.divider()
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("📄 PDF Files", len(get_pdfs()))
-        col2.metric("🖼️ Cached Images", len(glob.glob(f"{IMAGE_FOLDER}/*")) if os.path.exists(IMAGE_FOLDER) else 0)
-        with col3:
-            if st.button("🔄 Refresh Data Now", use_container_width=True):
-                st.cache_data.clear()
-                st.rerun()
-
-        st.divider()
-        st.subheader("📤 Upload PDF (Price List / Catalogue)")
-        up = st.file_uploader("Choose PDF", type=["pdf"])
-        if up and st.button("Save PDF", type="primary"):
-            path = os.path.join(PDF_FOLDER, up.name)
-            open(path, "wb").write(up.getbuffer())
-            st.success(f"✅ Saved {up.name}")
+    # UPLOAD
+    st.subheader("📤 Upload PDF")
+    up=st.file_uploader("Choose Price List PDF", type=["pdf"])
+    if up:
+        if st.button("💾 Save PDF", type="primary"):
+            path=os.path.join(PDF_FOLDER, up.name)
+            with open(path,"wb") as f: f.write(up.getbuffer())
+            st.success(f"Saved {up.name}")
             st.rerun()
 
-        pdfs = [os.path.basename(f) for f in get_pdfs()]
-        if pdfs:
-            st.write(f"**Available Files:** {pdfs}")
-        else:
-            st.warning("No PDFs uploaded yet")
+    # ===== THIS IS WHAT YOU SAID "Earlier it was shown" - NOW FIXED =====
+    st.divider()
+    st.subheader("📁 Saved Price Lists - Lined Up")
+    pdfs=get_pdfs()
+    if not pdfs:
+        st.warning("No files in 'files' folder. Upload above.")
+    else:
+        st.success(f"Found {len(pdfs)} files")
+        # Header row
+        h1,h2,h3,h4=st.columns([4,1.5,1.5,1.5])
+        h1.markdown("**File Name**")
+        h2.markdown("**Size**")
+        h3.markdown("**View**")
+        h4.markdown("**Download/Delete**")
 
+        for path in pdfs:
+            fname=os.path.basename(path)
+            size=os.path.getsize(path)/1024/1024
+            c1,c2,c3,c4=st.columns([4,1.5,1.5,1.5])
+            c1.write(f"📄 {fname}")
+            c2.write(f"{size:.2f} MB")
+            if c3.button("👁️ View", key=f"view_{fname}", use_container_width=True):
+                st.session_state.view_file=path
+            colA,colB=c4.columns(2)
+            with open(path,"rb") as f:
+                colA.download_button("⬇️", f, file_name=fname, key=f"dl_{fname}", use_container_width=True)
+            if colB.button("🗑️", key=f"del_{fname}", use_container_width=True):
+                os.remove(path)
+                if st.session_state.view_file==path: st.session_state.view_file=None
+                st.rerun()
+
+    # VIEWER - Shows below table like earlier
+    if st.session_state.view_file and os.path.exists(st.session_state.view_file):
         st.divider()
-        st.subheader("👥 Customer Management")
-        conn = sqlite3.connect(DB_PATH)
-        users = conn.execute("SELECT * FROM users WHERE email!=?", (ADMIN_EMAIL.lower(),)).fetchall()
-        conn.close()
+        st.subheader(f"👁️ Viewing: {os.path.basename(st.session_state.view_file)}")
+        if st.button("❌ Close Viewer"):
+            st.session_state.view_file=None
+            st.rerun()
+        try:
+            with open(st.session_state.view_file,"rb") as f:
+                b64=base64.b64encode(f.read()).decode()
+            pdf_html=f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="800" type="application/pdf"></iframe>'
+            st.markdown(pdf_html, unsafe_allow_html=True)
+        except Exception as e:
+            st.error(str(e))
 
-        if not users:
-            st.info("No customer requests yet")
-        else:
-            for row in users:
-                email_u, name_u, mob_u, city_u, status_u, allowed = row[0], row[1], row[2], row[3], row[8], row[9]
-                with st.expander(f"{'🟢' if status_u=='approved' else '🟡' if status_u=='pending' else '🔴'} {name_u} | {email_u} | {mob_u} | {status_u.upper()}"):
-                    st.write(f"City: {city_u} | Mobile: {mob_u}")
-                    sel = []
-                    st.write("**Allow access to files:**")
-                    for pdfn in pdfs:
-                        checked = pdfn in (allowed.split(",") if allowed else [])
-                        if st.checkbox(pdfn, value=checked, key=f"{email_u}_{pdfn}"):
-                            sel.append(pdfn)
-                    c1, c2, c3 = st.columns(3)
-                    if c1.button("✅ Approve", key=f"ap_{email_u}", use_container_width=True):
-                        conn = sqlite3.connect(DB_PATH)
-                        conn.execute("UPDATE users SET status='approved', allowed_files=? WHERE email=?", (",".join(sel), email_u))
-                        conn.commit(); conn.close()
-                        st.success("Approved"); st.rerun()
-                    if c2.button("🚫 Block", key=f"bl_{email_u}", use_container_width=True):
-                        conn = sqlite3.connect(DB_PATH)
-                        conn.execute("UPDATE users SET status='blocked' WHERE email=?", (email_u,))
-                        conn.commit(); conn.close()
-                        st.rerun()
-                    if c3.button("🗑️ Delete", key=f"del_{email_u}", use_container_width=True):
-                        conn = sqlite3.connect(DB_PATH)
-                        conn.execute("DELETE FROM users WHERE email=?", (email_u,))
-                        conn.commit(); conn.close()
-                        st.rerun()
-
-    # --- CUSTOMER SEARCH ---
+    # ===== SEARCH - FIXED FOR TEXT PDF =====
     st.divider()
     st.subheader("🔍 Product and price finder - AI Search")
-    q = st.text_input("Search product e.g. 'counter top basin', 'SS 202 tap', 'water closet'")
+    st.caption("Search e.g. 'counter top basin', 'SS 202 tap', 'adda basins'")
 
-    pdfs_all = get_pdfs()
-    if u["is_admin"]:
-        allowed_pdfs = pdfs_all
-    else:
-        allowed_pdfs = [os.path.join(PDF_FOLDER, f) for f in u["allowed_files"] if os.path.exists(os.path.join(PDF_FOLDER, f))]
-
+    q=st.text_input("Type to search", placeholder="adda basins")
     if q:
-        if not allowed_pdfs:
-            st.warning("No files allowed for you. Contact Admin 9840830500")
-        else:
-            st.info(f"Searching '{q}' in {len(allowed_pdfs)} file(s)... (Full Image+Text AI coming next - upload your PDFs now)")
-            # Simple text search demo - will upgrade to image search
-            import fitz
-            found = []
-            for pdf_path in allowed_pdfs:
-                try:
-                    doc = fitz.open(pdf_path)
-                    for page in doc:
-                        text = page.get_text()
-                        if q.lower() in text.lower():
-                            found.append(f"{os.path.basename(pdf_path)} - Page {page.number+1}")
-                except:
-                    pass
-            if found:
-                st.success(f"Found in: {found[:10]}")
-            else:
-                st.warning("No text match - but image search will be added next")
+        q_lower=q.lower().strip()
+        words=q_lower.split()
+        results=[]
+        for path in pdfs:
+            try:
+                doc=fitz.open(path)
+                for pno in range(len(doc)):
+                    text=doc[pno].get_text() or ""
+                    tl=text.lower()
+                    # Match if ALL words appear anywhere on page (not exact phrase)
+                    if all(w in tl for w in words):
+                        # Find snippet
+                        first=words[0]
+                        idx=tl.find(first)
+                        snippet=text[max(0,idx-100):idx+400]
+                        results.append({"file":os.path.basename(path),"page":pno+1,"snippet":snippet,"path":path,"pno":pno})
+            except Exception as e:
+                st.error(f"{path}: {e}")
 
-    st.sidebar.divider()
-    st.sidebar.caption("© Sagar Enterprise | Chennai\nProduct and price finder v1.0")
+        if results:
+            st.success(f"✅ Found {len(results)} matches for '{q}'")
+            for r in results[:25]:
+                with st.container(border=True):
+                    st.markdown(f"**📄 {r['file']}** | Page **{r['page']}**")
+                    st.text(r['snippet'])
+                    c1,c2=st.columns([1,1])
+                    with open(r['path'],"rb") as f:
+                        c1.download_button(f"⬇️ Open {r['file']}", f, file_name=r['file'], key=f"res_{r['file']}_{r['page']}_{q}_{r['pno']}")
+                    if c2.button(f"👁️ View Page {r['page']}", key=f"pv_{r['file']}_{r['page']}_{q}_{r['pno']}"):
+                        st.session_state.view_file=r['path']
+                        st.rerun()
+        else:
+            st.error(f"❌ No match for '{q}'")
+            st.info("Tip: Try single word. Your file has 'ADDA' - search 'adda' not 'adda basins'")
+            if pdfs:
+                st.write("Debug - Sample from first file Page 1:")
+                try:
+                    doc=fitz.open(pdfs[0])
+                    st.code(doc[0].get_text()[:1000])
+                except: pass

@@ -3,7 +3,7 @@ from pathlib import Path
 from PIL import Image
 import io
 st.set_page_config(page_title="Product & Price AI", layout="wide")
-st.title("🛁 Bathroom Price AI - Text + Image Search")
+st.title("🛁 Product & Price AI - Text + Image Search")
 
 PDF_DIR="data"
 os.makedirs(PDF_DIR, exist_ok=True)

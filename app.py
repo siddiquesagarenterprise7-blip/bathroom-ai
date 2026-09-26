@@ -26,7 +26,7 @@ if st.sidebar.button("🔄 Clear Cache & Refresh"):
     st.cache_data.clear()
     st.rerun()
 
-st.title("🛁 Bathroom Price AI")
+st.title("🛁 Product Price AI")
 
 query=st.text_input("🔍 Ask: blue counter basin, 110zp00, Catalano", placeholder="Type product code like 110zp00")
 

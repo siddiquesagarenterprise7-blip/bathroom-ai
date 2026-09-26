@@ -2,7 +2,7 @@ import streamlit as st, os, fitz
 from pathlib import Path
 from PIL import Image
 import io
-st.set_page_config(page_title="Bathroom Price AI", layout="wide")
+st.set_page_config(page_title="Product & Price AI", layout="wide")
 st.title("🛁 Bathroom Price AI - Text + Image Search")
 
 PDF_DIR="data"

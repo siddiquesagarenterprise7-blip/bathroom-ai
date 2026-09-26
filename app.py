@@ -86,7 +86,7 @@ if st.session_state.view_file and os.path.exists(st.session_state.view_file):
     except: pass
 
 st.subheader("🔍 Search - First 3 Words Primary (Brand Wise)")
-q=st.text_input("Search", value="antoniolupi freestanding basins", placeholder="e.g. catalano zero nero satin wc")
+q=st.text_input("Search", value="antoniolupi freestanding", placeholder="e.g. catalano zero nero satin wc")
 
 @st.cache_data
 def build_idx():
@@ -103,54 +103,54 @@ def build_idx():
 
 index=build_idx()
 
-# ===== 3 WORDS PRIMARY SEARCH =====
 if q:
     words=[w for w in re.findall(r'\b\w+\b', q.lower()) if len(w)>=2]
     if words:
         primary_words = words[:3]
         filter_words = words[3:]
-
         primary_match=[]
         for x in index:
             search_text = (x["file"] + " " + x["low"]).lower()
             if all(p in search_text for p in primary_words):
                 pos = search_text.find(primary_words[0]) if primary_words else 0
                 primary_match.append((pos, x))
-
         non_index=[(pos,x) for pos,x in primary_match if "SALES CONDITIONS" not in x["text"]]
 
+        # FIXED: Use dict with key sorting, no dict in sort
         scored=[]
         for pos,x in non_index:
             search_text = (x["file"] + " " + x["low"]).lower()
             filter_count = sum(1 for w in filter_words if w in search_text) if filter_words else 0
             has_price = 1 if "₹" in x["text"] else 0
-            scored.append((filter_count, has_price, -pos, x))
+            scored.append({"fc":filter_count, "price":has_price, "pos":pos, "item":x})
 
-        scored.sort(reverse=True)
+        # FIXED LINE 129 - Sort by key, not by dict
+        scored = sorted(scored, key=lambda s: (s["fc"], s["price"], -s["pos"]), reverse=True)
 
         if scored:
             if filter_words:
-                perfect=[s for s in scored if s[0]==len(filter_words)]
+                perfect=[s for s in scored if s["fc"]==len(filter_words)]
                 if perfect:
                     results_scored=perfect + [s for s in scored if s not in perfect]
                     st.success(f"✅ Primary '{' '.join(primary_words).upper()}' MUST - Found {len(perfect)} with ALL '{q}'")
                 else:
                     results_scored=scored
-                    st.success(f"✅ Primary '{' '.join(primary_words).upper()}' MUST - Found {len(scored)} - Best has {scored[0][0]}/{len(filter_words)} filters")
+                    st.success(f"✅ Primary '{' '.join(primary_words).upper()}' MUST - Found {len(scored)}")
             else:
                 results_scored=scored
                 st.success(f"✅ Primary '{' '.join(primary_words).upper()}' MUST - Found {len(scored)} pages")
 
-            for filter_count, has_price, neg_pos, it in results_scored[:15]:
+            for s in results_scored[:15]:
+                it=s["item"]
                 with st.container(border=True):
-                    st.markdown(f"**{it['file']} - Page {it['page']}** {'💰 PRICE' if has_price else ''} - Primary {'+'.join(primary_words)}")
+                    st.markdown(f"**{it['file']} - Page {it['page']}** {'💰 PRICE' if s['price'] else ''} - Primary {'+'.join(primary_words)}")
                     c1,c2=st.columns([2,3])
                     with c1:
                         st.code(it["text"][:1800])
-                        if st.button(f"👁️ View Page {it['page']}", key=f"p3_{it['file']}_{it['page']}_{filter_count}_{id(it)}", type="primary" if has_price else "secondary"):
+                        if st.button(f"👁️ View Page {it['page']}", key=f"p3_{it['file']}_{it['page']}_{s['fc']}_{id(it)}", type="primary" if s["price"] else "secondary"):
                             st.session_state.view_file=it["path"]; st.session_state.view_page=it["page"]; st.rerun()
                     with c2:
                         try: doc=fitz.open(it["path"]); pix=doc[it["pno"]].get_pixmap(dpi=180); p=f"/tmp/p3_{it['page']}_{id(it)}.png"; pix.save(p); st.image(p, use_container_width=True); doc.close()
                         except: pass
         else:
-            st.warning(f"No page with Primary '{' '.join(primary_words)}' - Try: antonioluoi, catalano, freestanding")
+            st.warning(f"No page with Primary '{' '.join(primary_words)}'")

@@ -45,7 +45,7 @@ def get_or_create_release():
         for r in repo.get_releases():
             if r.tag_name == "pdfs-storage":
                 return r
-        return repo.create_git_release(tag="pdfs-storage", name="PDF Storage 150MB", message="Large files up to 150MB single file", draft=False, prerelease=False)
+        return repo.create_git_release(tag="pdfs-storage", name="PDF Storage 150MB", message="Large files up to 150MB single file - NO SPLIT", draft=False, prerelease=False)
     except Exception as e:
         st.error(f"Release error: {e}")
         return None
@@ -109,7 +109,7 @@ if not st.session_state.customer_verified and not st.session_state.is_admin:
 
 st.title("🛁 Bathroom Product Search")
 if st.session_state.is_admin:
-    st.success("✅ Admin Mode - 150MB Single File - NO SPLIT")
+    st.success("✅ Admin Mode - 150MB Single File - NO SPLIT - FIXED")
 else:
     st.success(f"Welcome {st.session_state.customer_email}")
 
@@ -234,7 +234,7 @@ else:
 
 if st.session_state.is_admin:
     st.divider()
-    st.header("👑 Admin Panel - 150MB Single File NO SPLIT")
+    st.header("👑 Admin Panel - 150MB Single File NO SPLIT - FIXED")
     with st.expander("🏷️ Create / Manage Brands", expanded=True):
         brands_data, sha = get_json_file("data/brands.json", DEFAULT_BRANDS)
         if not brands_data: brands_data = DEFAULT_BRANDS
@@ -275,7 +275,7 @@ if st.session_state.is_admin:
                         st.rerun()
 
     with st.expander("📤 Upload Product PDFs - 150MB SINGLE FILE NO SPLIT", expanded=False):
-        st.success("✅ NO SPLIT - 150MB as single file via Releases")
+        st.success("✅ FIXED - NO SPLIT - 150MB as single file via Releases")
         try: repo.get_contents("pdfs")
         except:
             try: repo.create_file("pdfs/.gitkeep", "Create", "keep")
@@ -298,12 +298,13 @@ if st.session_state.is_admin:
                     if size_mb > 90:
                         release = get_or_create_release()
                         if not release:
-                            st.error("Release failed. Check token has repo permission.")
+                            st.error("Release failed. Check token.")
                             continue
                         for asset in release.get_assets():
                             if asset.name == f"{up_brand}_{safe_name}":
                                 asset.delete_asset()
-                        release.upload_asset_from_memory(file_bytes, f"{up_brand}_{safe_name}", content_type="application/pdf")
+                        # FIXED LINE - NO SPLIT SINGLE FILE
+                        release.upload_asset_from_memory(io.BytesIO(file_bytes), len(file_bytes), f"{up_brand}_{safe_name}", "application/pdf")
                         st.success(f"✅ Uploaded {size_mb:.1f}MB as SINGLE FILE to Releases! NO SPLIT!")
                     else:
                         path = f"pdfs/{up_brand}_{safe_name}"
@@ -337,8 +338,9 @@ if st.session_state.is_admin:
                         for asset in release.get_assets():
                             if asset.name == fname:
                                 asset.delete_asset()
-                        release.upload_asset_from_memory(file_bytes, fname, content_type="application/pdf")
-                        st.success(f"✅ Pricelist {size_mb:.1f}MB SINGLE FILE to Releases!")
+                        # FIXED LINE - NO SPLIT SINGLE FILE
+                        release.upload_asset_from_memory(io.BytesIO(file_bytes), len(file_bytes), fname, "application/pdf")
+                        st.success(f"✅ Pricelist {size_mb:.1f}MB SINGLE FILE to Releases! NO SPLIT!")
                     else:
                         path = f"pdfs/{fname}"
                         try:

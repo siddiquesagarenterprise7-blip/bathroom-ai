@@ -3,7 +3,7 @@ import base64, json, io, requests
 import fitz
 from github import Github
 
-st.set_page_config(page_title="Bathroom AI - BREEZE FIX", layout="wide")
+st.set_page_config(page_title="Bathroom AI - ALL FILES FIX", layout="wide")
 
 st.markdown("""
 <style>
@@ -58,26 +58,68 @@ def get_all_pdfs():
             for a in rel.get_assets():
                 if a.name.lower().endswith(".pdf") and a.name not in files: files.append(a.name)
     except: pass
+    # Also get via direct API for reliability
+    try:
+        headers={"Authorization": f"token {GITHUB_TOKEN}"}
+        r=requests.get(f"https://api.github.com/repos/{GITHUB_REPO_NAME}/releases/tags/pdfs-storage", headers=headers, timeout=30)
+        if r.status_code==200:
+            for ast in r.json().get("assets",[]):
+                nm=ast.get("name","")
+                if nm.lower().endswith(".pdf") and nm not in files: files.append(nm)
+    except: pass
     return files
 
+# ULTRA FIXED - DIRECT API DOWNLOAD FOR RELEASE
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_pdf_bytes_cached(fname):
+    # 1. Try pdfs folder (small files <1MB)
     try:
         fc=repo.get_contents(f"pdfs/{fname}")
-        return base64.b64decode(fc.content)
+        if fc.size < 900000: # GitHub API limit
+            data=base64.b64decode(fc.content)
+            if len(data)>1000: return data
+        else:
+            # Large file in pdfs folder - get download_url
+            try:
+                r=requests.get(fc.download_url, headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=120)
+                if r.status_code==200 and len(r.content)>1000: return r.content
+            except: pass
     except: pass
+    
+    # 2. DIRECT GITHUB API - MOST RELIABLE FOR RELEASE
+    try:
+        headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+        r=requests.get(f"https://api.github.com/repos/{GITHUB_REPO_NAME}/releases/tags/pdfs-storage", headers=headers, timeout=30)
+        if r.status_code==200:
+            assets=r.json().get("assets",[])
+            for ast in assets:
+                if ast.get("name")==fname:
+                    asset_id=ast.get("id")
+                    # Download asset by id with octet-stream
+                    dl_headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/octet-stream"}
+                    dl_url=f"https://api.github.com/repos/{GITHUB_REPO_NAME}/releases/assets/{asset_id}"
+                    dr=requests.get(dl_url, headers=dl_headers, timeout=180, allow_redirects=True)
+                    if dr.status_code==200 and len(dr.content)>5000:
+                        return dr.content
+                    # Fallback to browser_download_url
+                    try:
+                        br_url=ast.get("browser_download_url")
+                        dr2=requests.get(br_url, headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=180, allow_redirects=True)
+                        if dr2.status_code==200 and len(dr2.content)>5000:
+                            return dr2.content
+                    except: pass
+    except Exception as e:
+        pass
+    
+    # 3. PyGithub fallback
     try:
         rel=get_or_create_release()
         if rel:
             for a in rel.get_assets():
                 if a.name==fname:
-                    for hdr in [{"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/octet-stream"}, {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/octet-stream"}, {"Authorization": f"token {GITHUB_TOKEN}"}]:
-                        try:
-                            r=requests.get(a.url if "octet" in hdr["Accept"] else a.browser_download_url, headers=hdr, timeout=180, allow_redirects=True)
-                            if r.status_code==200 and len(r.content)>5000: return r.content
-                        except: pass
                     try:
-                        r=requests.get(a.browser_download_url, timeout=180)
+                        headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/octet-stream"}
+                        r=requests.get(a.url, headers=headers, timeout=180, allow_redirects=True)
                         if r.status_code==200 and len(r.content)>5000: return r.content
                     except: pass
     except: pass
@@ -89,7 +131,7 @@ def get_page_image_cached(fname, page_no):
     if not pb: return None
     try:
         doc=fitz.open(stream=pb, filetype="pdf")
-        pix=doc.load_page(page_no-1).get_pixmap(dpi=110, alpha=False) # Higher DPI for your BREEZE image clarity
+        pix=doc.load_page(page_no-1).get_pixmap(dpi=110, alpha=False)
         b=pix.tobytes("png")
         doc.close()
         return b
@@ -105,10 +147,9 @@ def search_fast(fname, query):
         doc=fitz.open(stream=pb, filetype="pdf")
         for i in range(len(doc)):
             txt=doc.load_page(i).get_text("text").lower()
-            # Also search in case BREEZE_STONE written as BREEZE STONE
-            if any(w in txt for w in words) or "breeze" in txt:
-                matched=[w for w in words if w in txt]
-                if not matched and "breeze" in txt: matched=["breeze"]
+            matched=[w for w in words if w in txt]
+            if len(matched)==len(words) or (query.lower() in txt):
+                if not matched and query.lower() in txt: matched=[query.lower()]
                 res.append((i+1, len(matched), matched))
         doc.close()
     except: pass
@@ -143,14 +184,13 @@ if not st.session_state.customer_verified and not st.session_state.is_admin:
             cust,_=get_json_file("data/customers.json", [])
             f=next((c for c in cust if c.get("mail","").lower()==mail.lower().strip()), None)
             if f and f.get("approved"): st.session_state.customer_verified=True; st.session_state.customer_email=mail; st.rerun()
-            else: st.error("Not found")
     st.stop()
 
 st.title("Pricelist Search")
 c1,c2=st.columns([3,1])
-with c1: st.write(f"Login: {st.session_state.customer_email if not st.session_state.is_admin else 'Admin'}")
+with c1: st.write(f"Login: Admin")
 with c2:
-    if st.button("Logout", use_container_width=True): st.session_state.customer_verified=False; st.session_state.is_admin=False; st.session_state.last_results=[]; st.session_state.selected=[]; st.rerun()
+    if st.button("Logout", use_container_width=True): st.session_state.customer_verified=False; st.session_state.is_admin=False; st.rerun()
 
 brands,_=get_json_file("data/brands.json", ["Fantini","Gessi","Antoniolupi","Catalano"])
 s1,s2,s3=st.columns([1,2,1])
@@ -180,13 +220,14 @@ if st.session_state.selected:
         st.session_state.presentation_pdf=nd.tobytes(); nd.close(); st.rerun()
     if st.session_state.presentation_pdf:
         st.download_button("📥 Download Presentation.pdf", data=st.session_state.presentation_pdf, file_name="Presentation.pdf", mime="application/pdf", use_container_width=True, type="primary")
+        st.caption("Saves to Downloads folder")
     if st.button("🗑️ Clear Basket", use_container_width=True): st.session_state.selected=[]; st.session_state.presentation_pdf=None; st.rerun()
 
 if do_search:
     allowed=get_allowed_files(st.session_state.customer_email, st.session_state.is_admin)
     filt=[f for f in allowed if brand.lower() in f.lower()] if brand!="All Brands" else allowed
-    if not filt: filt=allowed # If brand filter finds nothing, search all
-    final=[]; prog=st.progress(0)
+    if not filt: filt=allowed
+    final=[]; prog=st.progress(0, text="Searching...")
     for idx,fn in enumerate(filt):
         pages=search_fast(fn, query)
         for pno,cnt,matched in pages: final.append((fn,pno,cnt,matched))
@@ -202,22 +243,25 @@ with left:
             st.write(f"**{fn[:35]}**")
             pb=get_pdf_bytes_cached(fn)
             if pb: 
-                st.success(f"✅ {len(pb)/1024/1024:.1f}MB")
-                if st.button("👁️ View", key=f"v_{fn}"): 
-                    img=get_page_image_cached(fn,1)
-                    if img: st.image(img, use_container_width=True, caption="Page 1")
+                st.success(f"✅ {len(pb)/1024/1024:.1f}MB Loaded")
+                img1=get_page_image_cached(fn,1)
+                if img1: st.image(img1, use_container_width=True)
             else:
-                st.error("❌ Not loaded")
-                if st.button("🔄 Reload", key=f"rl_{fn}"): st.cache_data.clear(); st.rerun()
-            if pb: st.download_button("📥 Download", data=pb, file_name=fn, mime="application/pdf", key=f"dl_{fn}", use_container_width=True)
+                st.error("❌ Not loaded - Click Fix")
+                if st.button("🔧 Fix Load", key=f"fix_{fn}", use_container_width=True, type="primary"):
+                    st.cache_data.clear()
+                    st.cache_resource.clear()
+                    st.rerun()
+            if pb: 
+                st.download_button("📥 Download", data=pb, file_name=fn, mime="application/pdf", key=f"dl_{fn}", use_container_width=True)
 
 with right:
-    if not st.session_state.last_results: st.info("Click SEARCH - BREEZE_STONE will show like your photo")
+    if not st.session_state.last_results: st.info("Search BREEZE - Will show your photo page now")
     else:
         results=st.session_state.last_results
-        if not results: st.warning(f"No results for {query} - Try BREEZE without brand filter (Select All Brands)")
+        if not results: st.warning(f"No results for {query}")
         else:
-            st.success(f"Found {len(results)} pages for {query} - Like your BREEZE_STONE photo")
+            st.success(f"Found {len(results)} pages for {query}")
             pg=st.session_state.page_num; ps=6; total=(len(results)+ps-1)//ps
             if total>1:
                 c1,c2,c3=st.columns([1,2,1])
@@ -234,7 +278,7 @@ with right:
                         img=get_page_image_cached(fn,pn)
                         if img: st.image(img, use_container_width=True)
                         else: st.write(f"Loading P{pn}...")
-                        st.write(f"**{fn[:20]} P{pn}** - {', '.join(matched)}")
+                        st.write(f"**{fn[:15]} P{pn}**")
                         is_sel=(fn,pn) in st.session_state.selected
                         if st.checkbox("Add to Basket", key=f"chk_{fn}_{pn}_{idx}_{pg}", value=is_sel):
                             if (fn,pn) not in st.session_state.selected: st.session_state.selected.append((fn,pn)); st.session_state.presentation_images[f"{fn}_{pn}"]=img
@@ -242,4 +286,6 @@ with right:
                             if (fn,pn) in st.session_state.selected: st.session_state.selected.remove((fn,pn))
 
 if st.session_state.is_admin:
-    if st.button("🧹 Clear Cache - If images not loading"): st.cache_data.clear(); st.cache_resource.clear(); st.rerun()
+    st.divider()
+    if st.button("🧹 Clear Cache - Click if still Not loaded", use_container_width=True, type="primary"):
+        st.cache_data.clear(); st.cache_resource.clear(); st.rerun()

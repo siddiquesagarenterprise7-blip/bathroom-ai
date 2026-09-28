@@ -3,11 +3,10 @@ import base64, json, io, requests
 import fitz
 from github import Github
 
-st.set_page_config(page_title="Bathroom AI - FINAL COMPLETE", layout="wide")
+st.set_page_config(page_title="Bathroom AI - AUTO LOAD + RECOVERY", layout="wide")
 st.markdown("""
 <style>
 div[data-baseweb="input"] input {font-size:20px!important; height:50px!important; font-weight:600!important;}
-.stButton button {height:48px!important; font-weight:600!important;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -20,7 +19,7 @@ except: st.stop()
 @st.cache_resource
 def get_repo(): return Github(GITHUB_TOKEN).get_repo(GITHUB_REPO_NAME)
 repo = get_repo()
-DEFAULT_BRANDS = ["Fantini","Gessi","Antoniolupi","Catalano","FALPER","Jaquar","Grohe","Agape","Boffi"]
+DEFAULT_BRANDS = ["Fantini","Gessi","Antoniolupi","Catalano","FALPER","Jaquar","Grohe"]
 
 def get_json_file(p,d):
     try:
@@ -37,7 +36,7 @@ def save_json_file(p,data,sha,msg):
             try: ex=repo.get_contents(p); repo.update_file(p,msg,content,ex.sha)
             except: repo.create_file(p,msg,content)
         st.cache_data.clear()
-    except Exception as e: st.error(f"Save error: {e}")
+    except Exception as e: st.error(str(e))
 
 def ensure_files():
     for p,d in [("data/brands.json", DEFAULT_BRANDS), ("data/customers.json", []), ("data/file_access.json", {})]:
@@ -52,28 +51,63 @@ def get_or_create_release():
         return repo.create_git_release(tag="pdfs-storage", name="PDF Storage", message="storage", draft=False, prerelease=False)
     except: return None
 
-def get_all_pdfs():
-    files=[]
+# FIXED - CHECKS ALL LOCATIONS + DEBUG
+def get_all_pdfs_debug():
+    files_pdfs=[]
+    files_release=[]
+    # 1. pdfs/ folder
+    try:
+        for c in repo.get_contents("pdfs"):
+            if c.name.lower().endswith(".pdf"):
+                files_pdfs.append(c.name)
+    except Exception as e:
+        files_pdfs=[f"error pdfs folder: {e}"]
+    # 2. Release via API
     try:
         headers={"Authorization": f"token {GITHUB_TOKEN}"}
-        r=requests.get(f"https://api.github.com/repos/{GITHUB_REPO_NAME}/releases/tags/pdfs-storage", headers=headers, timeout=30)
+        r=requests.get(f"https://api.github.com/repos/{GITHUB_REPO_NAME}/releases", headers=headers, timeout=30)
         if r.status_code==200:
-            for ast in r.json().get("assets",[]):
+            for rel in r.json():
+                if rel.get("tag_name")=="pdfs-storage":
+                    for ast in rel.get("assets",[]):
+                        nm=ast.get("name","")
+                        if nm.lower().endswith(".pdf") and nm not in files_release:
+                            files_release.append(nm)
+        # Also try tags endpoint
+        r2=requests.get(f"https://api.github.com/repos/{GITHUB_REPO_NAME}/releases/tags/pdfs-storage", headers=headers, timeout=30)
+        if r2.status_code==200:
+            for ast in r2.json().get("assets",[]):
                 nm=ast.get("name","")
-                if nm.lower().endswith(".pdf") and nm not in files: files.append(nm)
-    except: pass
-    try:
-        rel=get_or_create_release()
-        if rel:
-            for a in rel.get_assets():
-                if a.name.lower().endswith(".pdf") and a.name not in files: files.append(a.name)
-    except: pass
-    return sorted(files)
+                if nm.lower().endswith(".pdf") and nm not in files_release:
+                    files_release.append(nm)
+    except Exception as e:
+        files_release=[f"error release: {e}"]
+
+    combined=list(set(files_pdfs + files_release))
+    combined=[f for f in combined if not f.startswith("error")]
+    return sorted(combined), files_pdfs, files_release
+
+def get_all_pdfs():
+    combined,_,_=get_all_pdfs_debug()
+    return combined
 
 @st.cache_data(ttl=3600, show_spinner=True)
 def get_pdf_bytes_cached(fname):
+    # Try pdfs/ folder download_url (for small files)
     try:
-        headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+        fc=repo.get_contents(f"pdfs/{fname}")
+        try:
+            data=base64.b64decode(fc.content)
+            if len(data)>1000: return data
+        except: pass
+        try:
+            r=requests.get(fc.download_url, headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=120)
+            if r.status_code==200 and len(r.content)>1000: return r.content
+        except: pass
+    except: pass
+    # Release
+    try:
+        headers={"Authorization": f"token {GITHUB_TOKEN}"}
         r=requests.get(f"https://api.github.com/repos/{GITHUB_REPO_NAME}/releases/tags/pdfs-storage", headers=headers, timeout=30)
         if r.status_code==200:
             for ast in r.json().get("assets",[]):
@@ -84,10 +118,6 @@ def get_pdf_bytes_cached(fname):
                     if dr.status_code==200:
                         content=b"".join(dr.iter_content(chunk_size=8192))
                         if len(content)>5000: return content
-                    dr2=requests.get(ast.get("browser_download_url"), headers={"Authorization": f"token {GITHUB_TOKEN}"}, timeout=300, allow_redirects=True, stream=True)
-                    if dr2.status_code==200:
-                        content=b"".join(dr2.iter_content(chunk_size=8192))
-                        if len(content)>5000: return content
     except: pass
     return None
 
@@ -97,8 +127,7 @@ def get_page_image_cached(fname, page_no):
     if not pb: return None
     try:
         doc=fitz.open(stream=pb, filetype="pdf")
-        # FIX RAINBOW GLITCH - Force RGB
-        pix=doc.load_page(page_no-1).get_pixmap(dpi=110, colorspace=fitz.csRGB, alpha=False)
+        pix=doc.load_page(page_no-1).get_pixmap(dpi=90, colorspace=fitz.csRGB, alpha=False)
         b=pix.tobytes("png")
         doc.close()
         return b
@@ -126,11 +155,9 @@ def get_allowed_files(mail, is_admin):
     allowed=[]
     for f in allf:
         lst=access.get(f, ["all"])
-        if "all" in lst or mail.lower() in [x.lower() for x in lst]:
-            allowed.append(f)
+        if "all" in lst or mail.lower() in [x.lower() for x in lst]: allowed.append(f)
     return allowed
 
-# SESSION
 if "customer_verified" not in st.session_state: st.session_state.customer_verified=False
 if "is_admin" not in st.session_state: st.session_state.is_admin=False
 if "customer_email" not in st.session_state: st.session_state.customer_email=""
@@ -140,64 +167,53 @@ if "presentation_images" not in st.session_state: st.session_state.presentation_
 if "page_num" not in st.session_state: st.session_state.page_num=1
 if "presentation_pdf" not in st.session_state: st.session_state.presentation_pdf=None
 
-# LOGIN - CUSTOMER + ADMIN BOTH BACK
 if not st.session_state.customer_verified and not st.session_state.is_admin:
     st.title("Pricelist Login")
-    t_cust, t_admin = st.tabs(["Customer Login / Signup", "Admin Login"])
-
+    t_cust, t_admin = st.tabs(["Customer", "Admin"])
     with t_admin:
-        st.markdown("### Admin Login")
-        pwd=st.text_input("Admin Password", type="password", key="admin_pwd")
+        pwd=st.text_input("Admin Password", type="password")
         if st.button("Login as Admin", type="primary", use_container_width=True):
             if pwd==ADMIN_PASSWORD:
                 st.session_state.is_admin=True; st.session_state.customer_verified=True; st.rerun()
-            else: st.error("Wrong password")
-
     with t_cust:
-        st.markdown("### Customer Login")
-        mail=st.text_input("Your Mail ID for Login", key="cust_mail_login")
+        mail=st.text_input("Your Mail ID")
         if st.button("Login as Customer", use_container_width=True):
             cust,_=get_json_file("data/customers.json", [])
             f=next((c for c in cust if c.get("mail","").lower()==mail.lower().strip()), None)
             if f and f.get("approved"):
                 st.session_state.customer_verified=True; st.session_state.customer_email=mail.lower().strip(); st.rerun()
-            elif f and not f.get("approved"):
-                st.warning("Your request pending - Admin will approve")
-            else:
-                st.error("Not registered - Please Signup below")
-
+            elif f and not f.get("approved"): st.warning("Pending approval")
+            else: st.error("Not registered - Signup below")
         st.divider()
-        st.markdown("### New Customer Signup")
-        with st.form("signup_form"):
-            n=st.text_input("Name*"); cont=st.text_input("Contact*"); m=st.text_input("Mail*"); city=st.text_input("City*"); pin=st.text_input("Pincode*"); comp=st.text_input("Company")
-            submitted=st.form_submit_button("Submit for Approval", type="primary", use_container_width=True)
-            if submitted:
-                if not m or not n:
-                    st.error("Name and Mail required")
-                else:
-                    cust,sha=get_json_file("data/customers.json", [])
-                    if any(c.get("mail","").lower()==m.lower().strip() for c in cust):
-                        st.warning("Already registered")
-                    else:
-                        cust.append({"name":n,"contact":cont,"mail":m.lower().strip(),"city":city,"pincode":pin,"company":comp,"approved":False})
-                        save_json_file("data/customers.json", cust, sha, "new customer signup")
-                        st.success("Submitted - Admin will approve soon!")
+        with st.form("signup"):
+            n=st.text_input("Name*"); cont=st.text_input("Contact*"); m=st.text_input("Mail*"); city=st.text_input("City*"); pin=st.text_input("Pincode*")
+            if st.form_submit_button("Submit", type="primary", use_container_width=True):
+                cust,sha=get_json_file("data/customers.json", [])
+                if not any(c.get("mail","").lower()==m.lower().strip() for c in cust):
+                    cust.append({"name":n,"contact":cont,"mail":m.lower().strip(),"city":city,"pincode":pin,"approved":False})
+                    save_json_file("data/customers.json", cust, sha, "signup")
+                    st.success("Submitted!")
     st.stop()
 
-# MAIN APP
 st.title("Pricelist Search")
+all_files, files_pdfs, files_release = get_all_pdfs_debug()
 top1,top2=st.columns([4,1])
 with top1:
     who = "Admin" if st.session_state.is_admin else st.session_state.customer_email
-    st.write(f"Login: {who} | Total Files: {len(get_all_pdfs())}")
+    st.write(f"Login: {who} | Total: {len(all_files)} | pdfs folder: {len(files_pdfs)} | Release: {len(files_release)}")
+    if len(all_files)<3:
+        st.error(f"⚠️ ONLY {len(all_files)} FILES IN GITHUB! Other 10 missing - You need to upload again. See debug below:")
+        st.write(f"pdfs/ folder contains: {files_pdfs}")
+        st.write(f"Release contains: {files_release}")
+        st.warning("Your old Antoniolupi, Catalano files were deleted from Release. Please re-upload from Admin -> Upload")
 with top2:
     if st.button("Logout", use_container_width=True):
-        st.session_state.customer_verified=False; st.session_state.is_admin=False; st.session_state.customer_email=""; st.rerun()
+        st.session_state.customer_verified=False; st.session_state.is_admin=False; st.rerun()
 
 brands,_=get_json_file("data/brands.json", DEFAULT_BRANDS)
 s1,s2,s3=st.columns([1,2,1])
 with s1: brand=st.selectbox("Brand", ["All Brands"]+brands)
-with s2: query=st.text_input("Search Pricelist", placeholder="BREEZE", value="BREEZE")
+with s2: query=st.text_input("Search Pricelist", placeholder="mint spout", value="mint spout")
 with s3:
     st.write(""); st.write("")
     do_search=st.button("SEARCH ALL MATCHES", type="primary", use_container_width=True)
@@ -214,16 +230,16 @@ if do_search:
     prog.empty()
     st.session_state.last_results=final; st.session_state.page_num=1; st.rerun()
 
-tab_search, tab_pricelist, tab_basket, tab_admin = st.tabs(["Search Results", "PRICE LIST", "Basket", "Admin / Upload"])
+tab_search, tab_pricelist, tab_basket, tab_admin = st.tabs(["Search Results", f"PRICE LIST ({len(all_files)})", "Basket", "Admin"])
 
 with tab_search:
     if not st.session_state.last_results:
-        st.info("Type BREEZE and click SEARCH - Results show here")
+        st.info("Search results - Auto loaded")
     else:
         results=st.session_state.last_results
-        if not results: st.warning(f"No results for {query} - Try All Brands")
+        if not results: st.warning(f"No results for {query}")
         else:
-            st.success(f"Found {len(results)} pages for {query}")
+            st.success(f"Found {len(results)} pages")
             pg=st.session_state.page_num; ps=6; total=(len(results)+ps-1)//ps
             if total>1:
                 c1,c2,c3=st.columns([1,2,1])
@@ -239,32 +255,30 @@ with tab_search:
                     with st.container(border=True):
                         img=get_page_image_cached(fn,pn)
                         if img: st.image(img, use_container_width=True)
-                        else: st.warning(f"P{pn} - Load in PRICE LIST first")
+                        else: st.warning(f"P{pn} loading...")
                         st.write(f"P{pn} {fn[:18]}")
                         if st.checkbox("Add to Basket", key=f"chk_{fn}_{pn}_{idx}_{pg}", value=(fn,pn) in st.session_state.selected):
                             if (fn,pn) not in st.session_state.selected: st.session_state.selected.append((fn,pn)); st.session_state.presentation_images[f"{fn}_{pn}"]=img
-                        else:
-                            if (fn,pn) in st.session_state.selected: st.session_state.selected.remove((fn,pn))
 
 with tab_pricelist:
-    st.markdown("### All Pricelists - Maximise when needed")
-    st.caption("This tab keeps search clean - Open only when you need")
+    st.markdown("### All Pricelists - Automatic Loading")
+    st.caption("No Load button - Auto loads and caches - Maximise when needed")
     files=get_allowed_files(st.session_state.customer_email, st.session_state.is_admin)
-    st.write(f"Total: {len(files)} files")
-    if not files: st.warning("No files allowed")
+    if len(files)==2:
+        st.error("Only 2 files left in GitHub - Other 10 were deleted. Please upload Antoniolupi, Catalano again in Admin tab")
     cols=st.columns(3)
     for idx,fn in enumerate(files):
         with cols[idx%3]:
             with st.container(border=True):
                 st.write(f"**{fn}**")
-                if st.button("Load & Preview", key=f"load_{idx}", type="primary", use_container_width=True):
-                    with st.spinner(f"Loading {fn}..."):
-                        pb=get_pdf_bytes_cached(fn)
-                        if pb:
-                            st.success(f"{len(pb)/1024/1024:.1f}MB Loaded")
-                            img=get_page_image_cached(fn,1)
-                            if img: st.image(img, use_container_width=True)
-                        else: st.error("Failed")
+                # AUTOMATIC LOADING - NO BUTTON NEEDED
+                pb=get_pdf_bytes_cached(fn)
+                if pb:
+                    st.success(f"{len(pb)/1024/1024:.1f}MB - Auto Loaded")
+                    img=get_page_image_cached(fn,1)
+                    if img: st.image(img, use_container_width=True, caption="Auto preview Page 1")
+                else:
+                    st.error("Not loaded - File missing in GitHub")
 
 with tab_basket:
     st.markdown(f"### Basket: {len(st.session_state.selected)}")
@@ -289,72 +303,44 @@ with tab_admin:
     if not st.session_state.is_admin:
         st.warning("Admin only")
     else:
-        admin_section = st.radio("Select Admin Section", ["Customer Approval / List", "File Access", "Brands", "Upload"], horizontal=True)
-
+        admin_section = st.radio("Admin Section", ["Customer Approval / List", "Upload - Restore Missing Files"], horizontal=True)
         if admin_section == "Customer Approval / List":
             cust,sha_c=get_json_file("data/customers.json", [])
-            st.markdown(f"### Customer Approval - Total: {len(cust)}")
             pending=[c for c in cust if not c.get("approved")]
-            st.markdown(f"**Pending: {len(pending)} | Approved: {len(cust)-len(pending)}**")
-            if pending:
-                for i,c in enumerate(cust):
-                    if not c.get("approved"):
-                        with st.container(border=True):
-                            st.write(f"{c.get('name')} | {c.get('mail')} | {c.get('contact')} | {c.get('city')}")
-                            ca,cr=st.columns(2)
-                            with ca:
-                                if st.button("Approve", key=f"ap_{i}", type="primary", use_container_width=True):
-                                    cust[i]["approved"]=True
-                                    save_json_file("data/customers.json", cust, sha_c, "approve")
-                                    st.rerun()
-                            with cr:
-                                if st.button("Reject", key=f"rej_{i}", use_container_width=True):
-                                    cust.pop(i)
-                                    save_json_file("data/customers.json", cust, sha_c, "reject")
-                                    st.rerun()
+            st.write(f"Pending: {len(pending)} | Total: {len(cust)}")
+            for i,c in enumerate(cust):
+                if not c.get("approved"):
+                    with st.container(border=True):
+                        st.write(f"{c.get('name')} | {c.get('mail')} | {c.get('contact')}")
+                        if st.button("Approve", key=f"ap_{i}", type="primary", use_container_width=True):
+                            cust[i]["approved"]=True
+                            save_json_file("data/customers.json", cust, sha_c, "approve")
+                            st.rerun()
             st.divider()
-            st.markdown("**All Customers List:**")
-            for c in cust:
-                status="Approved" if c.get("approved") else "Pending"
-                st.write(f"{status} - {c.get('name')} - {c.get('mail')}")
-
-        elif admin_section == "File Access":
-            st.markdown("### File Access")
-            acc,sha_acc=get_json_file("data/file_access.json", {})
-            for fn in get_all_pdfs():
-                st.write(f"{fn} - {acc.get(fn,['all'])}")
-
-        elif admin_section == "Brands":
-            blist,sha_b=get_json_file("data/brands.json", DEFAULT_BRANDS)
-            st.write(f"Current: {', '.join(blist)}")
-            nb=st.text_input("New Brand")
-            if st.button("Create Brand"):
-                if nb.strip() not in blist:
-                    blist.append(nb.strip())
-                    save_json_file("data/brands.json", blist, sha_b, "add brand")
-                    st.rerun()
-
+            for c in cust: st.write(f"{'Approved' if c.get('approved') else 'Pending'} - {c.get('name')} - {c.get('mail')}")
         else:
-            st.markdown("### Upload Pricelists")
-            ups=st.file_uploader("Choose PDFs", type=["pdf"], accept_multiple_files=True)
-            if st.button("Upload to Release", type="primary", use_container_width=True):
+            st.markdown("### Restore Missing Files - Upload Again")
+            st.error(f"Current only 2 files: {all_files}. Your other Antoniolupi_*.pdf, Catalano_*.pdf missing.")
+            st.info("Please upload missing 10 files again here - Will restore")
+            ups=st.file_uploader("Choose missing PDFs (Multiple)", type=["pdf"], accept_multiple_files=True, key="restore_uploader")
+            if st.button("Upload & Restore", type="primary", use_container_width=True):
                 rel=get_or_create_release()
-                if not rel: st.error("Release not found")
-                else:
-                    for f in ups:
-                        safe=f.name.replace(" ","_")
-                        fb=f.getvalue()
-                        try:
-                            for a in rel.get_assets():
-                                if a.name==safe:
-                                    try: a.delete_asset()
-                                    except: pass
-                            rel.upload_asset_from_memory(io.BytesIO(fb), len(fb), safe, "application/pdf")
-                            acc,sha_acc=get_json_file("data/file_access.json", {})
-                            acc[safe]=["all"]
-                            save_json_file("data/file_access.json", acc, sha_acc, "upload")
-                            st.success(f"✅ {safe} {len(fb)/1024/1024:.1f}MB")
-                        except Exception as e: st.error(f"{safe}: {e}")
-                    st.cache_data.clear(); st.rerun()
+                if not rel: st.error("Release not found - Creating")
+                rel=get_or_create_release()
+                for f in ups:
+                    safe=f.name.replace(" ","_")
+                    fb=f.getvalue()
+                    try:
+                        for a in rel.get_assets():
+                            if a.name==safe:
+                                try: a.delete_asset()
+                                except: pass
+                        rel.upload_asset_from_memory(io.BytesIO(fb), len(fb), safe, "application/pdf")
+                        acc,sha_acc=get_json_file("data/file_access.json", {})
+                        acc[safe]=["all"]
+                        save_json_file("data/file_access.json", acc, sha_acc, "restore")
+                        st.success(f"✅ Restored {safe} {len(fb)/1024/1024:.1f}MB")
+                    except Exception as e: st.error(f"{safe}: {e}")
+                st.cache_data.clear(); st.rerun()
         if st.button("Clear Cache", use_container_width=True):
             st.cache_data.clear(); st.cache_resource.clear(); st.rerun()

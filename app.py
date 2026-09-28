@@ -3,14 +3,14 @@ import base64, json, io
 import fitz
 from github import Github
 
-st.set_page_config(page_title="Bathroom AI - 150MB Single File", layout="wide")
+st.set_page_config(page_title="Bathroom AI - Max Matching", layout="wide")
 
 try:
     GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
     GITHUB_REPO_NAME = st.secrets["GITHUB_REPO"]
     ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "Bathroom@123")
 except:
-    st.error("Add Secrets: GITHUB_TOKEN, GITHUB_REPO, ADMIN_PASSWORD")
+    st.error("Add Secrets")
     st.stop()
 
 @st.cache_resource
@@ -37,18 +37,81 @@ def save_json_file(path, data, sha, message):
             try:
                 existing = repo.get_contents(path)
                 repo.update_file(path, message, content, existing.sha)
-            except Exception as e:
-                st.error(f"Save failed {path}: {e}")
+            except:
+                pass
 
 def get_or_create_release():
     try:
         for r in repo.get_releases():
             if r.tag_name == "pdfs-storage":
                 return r
-        return repo.create_git_release(tag="pdfs-storage", name="PDF Storage 150MB", message="Large files up to 150MB single file - NO SPLIT", draft=False, prerelease=False)
-    except Exception as e:
-        st.error(f"Release error: {e}")
+        return repo.create_git_release(tag="pdfs-storage", name="PDF Storage", message="150MB", draft=False, prerelease=False)
+    except:
         return None
+
+def get_all_pdf_files():
+    all_files = []
+    try:
+        contents = repo.get_contents("pdfs")
+        for c in contents:
+            if c.name.lower().endswith(".pdf") and not c.name.upper().startswith("PRICELIST_"):
+                all_files.append(c.name)
+    except: pass
+    try:
+        release = get_or_create_release()
+        if release:
+            for asset in release.get_assets():
+                if asset.name.lower().endswith(".pdf") and not asset.name.upper().startswith("PRICELIST_"):
+                    if asset.name not in all_files:
+                        all_files.append(asset.name)
+    except: pass
+    return all_files
+
+def get_all_pricelists():
+    pricelists = []
+    try:
+        contents = repo.get_contents("pdfs")
+        for c in contents:
+            if c.name.upper().startswith("PRICELIST_") and c.name.lower().endswith(".pdf"):
+                pricelists.append((c.name, "folder", None))
+    except: pass
+    try:
+        release = get_or_create_release()
+        if release:
+            for asset in release.get_assets():
+                if asset.name.upper().startswith("PRICELIST_") and asset.name.lower().endswith(".pdf"):
+                    pricelists.append((asset.name, "release", asset))
+    except: pass
+    return pricelists
+
+# MAXIMUM MATCHING: All 3 words > 2 words > 1 word
+def search_max_matching(pdf_bytes, query):
+    query_words = [w.lower() for w in query.strip().split() if w.strip()]
+    if not query_words:
+        return []
+    # Only take first 3-4 words for matching to avoid too many
+    query_words = query_words[:4]
+    results = [] # [(page_no, match_count, matched_words, image_bytes)]
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for page_idx in range(len(doc)):
+            page = doc.load_page(page_idx)
+            text_lower = page.get_text("text").lower()
+            matched = []
+            for q in query_words:
+                if q in text_lower:
+                    matched.append(q)
+            match_count = len(matched)
+            if match_count > 0:
+                pix = page.get_pixmap(dpi=200)
+                img_bytes = pix.tobytes("png")
+                results.append((page_idx + 1, match_count, matched, img_bytes))
+        doc.close()
+    except:
+        pass
+    # Sort by maximum matching first: 3 > 2 > 1
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
 
 if "customer_verified" not in st.session_state:
     st.session_state.customer_verified = False
@@ -61,26 +124,26 @@ DEFAULT_BRANDS = ["Fantini", "Gessi", "Hansgrohe", "Jaquar", "Grohe"]
 
 if not st.session_state.customer_verified and not st.session_state.is_admin:
     st.title("🛁 Bathroom Product Login")
-    tab1, tab2 = st.tabs(["👤 Customer Login / Signup", "🔐 Admin Login"])
+    tab1, tab2 = st.tabs(["👤 Customer", "🔐 Admin"])
     with tab2:
-        admin_pwd = st.text_input("Admin Password", type="password", key="admin_tab")
+        pwd = st.text_input("Admin Password", type="password")
         if st.button("Login as Admin", type="primary", use_container_width=True):
-            if admin_pwd == ADMIN_PASSWORD:
+            if pwd == ADMIN_PASSWORD:
                 st.session_state.is_admin = True
                 st.session_state.customer_verified = True
                 st.rerun()
             else:
-                st.error("Wrong Password")
+                st.error("Wrong")
     with tab1:
         with st.container(border=True):
-            login_mail = st.text_input("Enter your Mail ID to Login")
+            login_mail = st.text_input("Enter Mail ID")
             if st.button("Login"):
                 customers, _ = get_json_file("data/customers.json", [])
                 found = next((c for c in customers if c.get("mail","").lower() == login_mail.lower().strip()), None)
                 if not found:
-                    st.error("Mail ID not found. Signup below.")
+                    st.error("Not found")
                 elif not found.get("approved", False):
-                    st.warning("⏳ Pending Admin approval.")
+                    st.warning("Pending approval")
                 else:
                     st.session_state.customer_verified = True
                     st.session_state.customer_email = login_mail
@@ -92,24 +155,18 @@ if not st.session_state.customer_verified and not st.session_state.is_admin:
             mail = st.text_input("Mail ID*")
             city = st.text_input("City*")
             pincode = st.text_input("Pincode*")
-            company = st.text_input("Company Name (Optional)")
-            submit = st.form_submit_button("Submit for Approval", use_container_width=True)
+            company = st.text_input("Company (Optional)")
+            submit = st.form_submit_button("Submit", use_container_width=True)
             if submit:
-                if not all([name.strip(), contact.strip(), mail.strip(), city.strip(), pincode.strip()]):
-                    st.error("Fill all *")
-                else:
-                    customers, sha = get_json_file("data/customers.json", [])
-                    if any(c.get("mail","").lower() == mail.lower().strip() for c in customers):
-                        st.error("Already registered.")
-                    else:
-                        customers.append({"name":name,"contact":contact,"mail":mail.strip(),"city":city,"pincode":pincode,"company":company,"approved": False})
-                        save_json_file("data/customers.json", customers, sha, f"New {name}")
-                        st.success("✅ Submitted! Wait for approval.")
+                customers, sha = get_json_file("data/customers.json", [])
+                customers.append({"name":name,"contact":contact,"mail":mail.strip(),"city":city,"pincode":pincode,"company":company,"approved": False})
+                save_json_file("data/customers.json", customers, sha, f"New {name}")
+                st.success("Submitted!")
     st.stop()
 
 st.title("🛁 Bathroom Product Search")
 if st.session_state.is_admin:
-    st.success("✅ Admin Mode - 150MB Single File - NO SPLIT - FIXED")
+    st.success("✅ Admin Mode - Maximum Matching: All3 > All2 > All1")
 else:
     st.success(f"Welcome {st.session_state.customer_email}")
 
@@ -123,9 +180,9 @@ if not brands_data: brands_data = DEFAULT_BRANDS
 brand_options = ["All Brands"] + brands_data
 col1, col2 = st.columns([1,2])
 with col1: brand_filter = st.selectbox("Brand", brand_options)
-with col2: search_query = st.text_input("Search Products", placeholder="e.g. 200mm Round shower")
-search_btn = st.button("🔍 Search Products", use_container_width=True)
-if "page_num" not in st.session_state: st.session_state.page_num = 0
+with col2: search_query = st.text_input("Search Products", placeholder="e.g. Mint shower head round")
+
+search_btn = st.button("🔍 Search - Max Matching (All3>All2>All1)", use_container_width=True, type="primary")
 
 approvals_data, _ = get_json_file("data/approvals.json", [])
 def is_approved(filename):
@@ -133,47 +190,31 @@ def is_approved(filename):
         if a["file"]==filename and a.get("approved"): return True
     return False
 
-if search_btn or search_query or brand_filter!="All Brands" or st.session_state.page_num>0:
-    all_files = []
-    try:
-        contents = repo.get_contents("pdfs")
-        all_files += [c.name for c in contents if c.name.lower().endswith(".pdf") and not c.name.upper().startswith("PRICELIST_")]
-    except: pass
-    try:
-        release = get_or_create_release()
-        if release:
-            for asset in release.get_assets():
-                if asset.name.lower().endswith(".pdf") and not asset.name.upper().startswith("PRICELIST_"):
-                    all_files.append(asset.name)
-    except: pass
+if search_btn or search_query.strip() or brand_filter!="All Brands":
+    all_files = get_all_pdf_files()
+    filtered_by_brand = all_files
+    if brand_filter!="All Brands":
+        filtered_by_brand = [f for f in filtered_by_brand if brand_filter.lower() in f.lower()]
+    if not st.session_state.is_admin:
+        filtered_by_brand = [f for f in filtered_by_brand if is_approved(f)]
 
-    filtered = all_files
-    if brand_filter!="All Brands": filtered = [f for f in filtered if brand_filter.lower() in f.lower()]
-    if search_query: filtered = [f for f in filtered if search_query.lower() in f.lower()]
-    if not st.session_state.is_admin: filtered = [f for f in filtered if is_approved(f)]
+    if not search_query.strip():
+        st.write(f"Found {len(filtered_by_brand)} products")
+    else:
+        query_words = search_query.strip().split()
+        st.info(f"Searching for **{query_words}** — Will show **{len(query_words)} words matched first, then {len(query_words)-1}, then 1**")
 
-    st.write(f"Found {len(filtered)} products")
-    per_page=20
-    total=len(filtered)
-    total_pages=(total+per_page-1)//per_page if total>0 else 1
-    start=st.session_state.page_num*per_page
-    end=min(start+per_page, total)
-    c1,c2=st.columns(2)
-    with c1:
-        if st.button("⬅️ Previous", disabled=st.session_state.page_num==0):
-            st.session_state.page_num-=1; st.rerun()
-    with c2:
-        if st.button("Next ➡️", disabled=st.session_state.page_num>=total_pages-1):
-            st.session_state.page_num+=1; st.rerun()
+        all_matched = [] # [(filename, pdf_bytes, pages)]
+        progress = st.progress(0)
+        status = st.empty()
 
-    for filename in filtered[start:end]:
-        with st.container(border=True):
-            st.write(f"**{filename}**")
+        for idx, filename in enumerate(filtered_by_brand):
+            status.write(f"Checking {idx+1}/{len(filtered_by_brand)}: {filename}")
             try:
                 pdf_bytes = None
                 try:
-                    file_content = repo.get_contents(f"pdfs/{filename}")
-                    pdf_bytes = base64.b64decode(file_content.content)
+                    fc = repo.get_contents(f"pdfs/{filename}")
+                    pdf_bytes = base64.b64decode(fc.content)
                 except:
                     release = get_or_create_release()
                     if release:
@@ -184,171 +225,97 @@ if search_btn or search_query or brand_filter!="All Brands" or st.session_state.
                                 pdf_bytes = r.content
                                 break
                 if pdf_bytes:
-                    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                    page = doc.load_page(0)
-                    pix = page.get_pixmap(dpi=180)
-                    img_bytes = pix.tobytes("png")
-                    st.image(img_bytes, use_container_width=True)
+                    pages = search_max_matching(pdf_bytes, search_query)
+                    if pages:
+                        all_matched.append((filename, pdf_bytes, pages))
+            except:
+                pass
+            progress.progress((idx+1)/len(filtered_by_brand) if filtered_by_brand else 1)
+
+        progress.empty()
+        status.empty()
+
+        if not all_matched:
+            st.warning(f"No match for {query_words}")
+        else:
+            # Sort files by max matching count
+            all_matched.sort(key=lambda x: max(p[1] for p in x[2]), reverse=True)
+            st.success(f"Found in {len(all_matched)} file(s) - Sorted by Max Matching")
+
+            for filename, pdf_bytes, pages in all_matched:
+                with st.container(border=True):
+                    best_match = pages[0][1] if pages else 0
+                    st.write(f"### 📄 {filename} — Best Match: {best_match}/{len(query_words)} words")
+                    # Group by match count
+                    for page_no, match_count, matched_words, img_bytes in pages:
+                        if match_count == len(query_words):
+                            badge = "🟢 ALL WORDS MATCH"
+                        elif match_count == len(query_words)-1:
+                            badge = "🟡 2 WORDS MATCH"
+                        else:
+                            badge = f"🔵 {match_count} WORD MATCH"
+                        st.write(f"**Page {page_no}** — {badge} — Matched: {', '.join(matched_words)}")
+                        st.image(img_bytes, caption=f"Page {page_no} - {match_count} words matched", use_container_width=True)
+                        st.divider()
                     st.download_button(f"📥 Download {filename}", data=pdf_bytes, file_name=filename, mime="application/pdf", key=f"dl_{filename}")
-            except Exception as e:
-                st.error(f"{e}")
 
 st.divider()
-st.header("💰 Pricelists - View & Download")
-pricelists = []
-try:
-    contents = repo.get_contents("pdfs")
-    pricelists += [(c.name, "folder") for c in contents if c.name.upper().startswith("PRICELIST_")]
-except: pass
-try:
-    release = get_or_create_release()
-    if release:
-        for asset in release.get_assets():
-            if asset.name.upper().startswith("PRICELIST_"):
-                pricelists.append((asset.name, "release", asset))
-except: pass
-
+st.header("💰 Pricelists")
+pricelists = get_all_pricelists()
 if not pricelists:
     st.info("No pricelists yet.")
 else:
     for item in pricelists:
         name = item[0]
         with st.container(border=True):
-            col_pl1, col_pl2 = st.columns([3,1])
-            with col_pl1:
-                st.write(f"**{name.replace('PRICELIST_','').replace('.pdf','')} Pricelist**")
-            with col_pl2:
+            c1,c2 = st.columns([3,1])
+            with c1: st.write(f"**{name.replace('PRICELIST_','').replace('.pdf','')} Pricelist**")
+            with c2:
                 try:
                     import requests
                     pdf_bytes = None
-                    if item[1] == "folder":
-                        file_content = repo.get_contents(f"pdfs/{name}")
-                        pdf_bytes = base64.b64decode(file_content.content)
+                    if item[1]=="folder":
+                        fc = repo.get_contents(f"pdfs/{name}")
+                        pdf_bytes = base64.b64decode(fc.content)
                     else:
                         r = requests.get(item[2].browser_download_url)
                         pdf_bytes = r.content
                     if pdf_bytes:
-                        st.download_button(f"📥 Download", data=pdf_bytes, file_name=name, mime="application/pdf", key=f"pl_dl_{name}", use_container_width=True)
-                except Exception as e:
-                    st.error(f"{e}")
+                        st.download_button("📥 Download", data=pdf_bytes, file_name=name, mime="application/pdf", key=f"pl_{name}", use_container_width=True)
+                except:
+                    pass
 
 if st.session_state.is_admin:
     st.divider()
-    st.header("👑 Admin Panel - 150MB Single File NO SPLIT - FIXED")
-    with st.expander("🏷️ Create / Manage Brands", expanded=True):
-        brands_data, sha = get_json_file("data/brands.json", DEFAULT_BRANDS)
-        if not brands_data: brands_data = DEFAULT_BRANDS
-        for i, b in enumerate(brands_data):
-            col_b1, col_b2 = st.columns([3,1])
-            with col_b1: st.write(f"• {b}")
-            with col_b2:
-                if st.button("Delete", key=f"del_brand_{i}"):
-                    brands_data.pop(i)
-                    save_json_file("data/brands.json", brands_data, sha, f"Deleted {b}")
-                    st.rerun()
-        new_brand = st.text_input("New Brand Name", placeholder="e.g. Kohler")
-        if st.button("Add Brand", type="primary"):
-            if not new_brand.strip(): st.error("Enter brand")
-            elif new_brand.strip() in brands_data: st.error("Exists")
-            else:
-                brands_data.append(new_brand.strip())
-                save_json_file("data/brands.json", brands_data, sha, f"Added {new_brand}")
-                st.rerun()
-
-    with st.expander("👥 Approve Customer Logins", expanded=False):
-        customers, sha = get_json_file("data/customers.json", [])
-        pending = [c for c in customers if not c.get("approved", False)]
-        st.write(f"Pending: {len(pending)} | Total: {len(customers)}")
-        for i, c in enumerate(customers):
-            if not c.get("approved", False):
-                col_a, col_b, col_c = st.columns([3,1,1])
-                with col_a: st.write(f"**{c['name']}** | {c['mail']}")
-                with col_b:
-                    if st.button("✅ Approve", key=f"cust_app_{i}"):
-                        customers[i]["approved"] = True
-                        save_json_file("data/customers.json", customers, sha, f"Approved {c['mail']}")
-                        st.rerun()
-                with col_c:
-                    if st.button("❌ Delete", key=f"cust_del_{i}"):
-                        customers.pop(i)
-                        save_json_file("data/customers.json", customers, sha, f"Deleted {c['mail']}")
-                        st.rerun()
-
-    with st.expander("📤 Upload Product PDFs - 150MB SINGLE FILE NO SPLIT", expanded=False):
-        st.success("✅ FIXED - NO SPLIT - 150MB as single file via Releases")
-        try: repo.get_contents("pdfs")
-        except:
-            try: repo.create_file("pdfs/.gitkeep", "Create", "keep")
-            except: pass
+    st.header("👑 Admin Panel")
+    with st.expander("📤 Upload Product PDFs - 150MB SINGLE FILE", expanded=False):
         up_brand = st.selectbox("Select Brand", brands_data, key="up_prod_brand")
-        up_files = st.file_uploader("Choose PDFs - Max 150MB Single File", type=["pdf"], accept_multiple_files=True, key="up_prod")
-        if st.button("Upload 150MB Single File to GitHub", type="primary"):
-            if not up_files: st.error("Select file")
+        up_files = st.file_uploader("Choose PDFs", type=["pdf"], accept_multiple_files=True, key="up_prod")
+        if st.button("Upload 150MB Single", type="primary"):
             for f in up_files:
                 try:
                     safe_name = f.name.replace(" ", "_")
                     file_bytes = f.getvalue()
-                    size_mb = len(file_bytes)/(1024*1024)
-                    st.write(f"Uploading {safe_name} - {size_mb:.1f}MB")
-
-                    if size_mb > 150:
-                        st.error(f">150MB blocked. Compress.")
-                        continue
-
-                    if size_mb > 90:
+                    if len(file_bytes)/(1024*1024) > 90:
                         release = get_or_create_release()
-                        if not release:
-                            st.error("Release failed. Check token.")
-                            continue
                         for asset in release.get_assets():
                             if asset.name == f"{up_brand}_{safe_name}":
                                 asset.delete_asset()
-                        # FIXED LINE - NO SPLIT SINGLE FILE
                         release.upload_asset_from_memory(io.BytesIO(file_bytes), len(file_bytes), f"{up_brand}_{safe_name}", "application/pdf")
-                        st.success(f"✅ Uploaded {size_mb:.1f}MB as SINGLE FILE to Releases! NO SPLIT!")
+                        st.success(f"✅ Uploaded SINGLE FILE to Releases!")
                     else:
                         path = f"pdfs/{up_brand}_{safe_name}"
                         try:
-                            existing = repo.get_contents(path)
-                            repo.update_file(path, f"Update {safe_name}", file_bytes, existing.sha)
+                            ex = repo.get_contents(path)
+                            repo.update_file(path, f"Update {safe_name}", file_bytes, ex.sha)
                         except:
                             repo.create_file(path, f"Add {safe_name}", file_bytes)
-                        st.success(f"✅ Uploaded {size_mb:.1f}MB as SINGLE FILE to pdfs/ folder")
-
+                        st.success(f"✅ Uploaded!")
                     curr_approvals, curr_sha = get_json_file("data/approvals.json", [])
                     fname = f"{up_brand}_{safe_name}"
                     if not any(x["file"]==fname for x in curr_approvals):
                         curr_approvals.append({"brand":up_brand,"file":fname,"approved":False})
-                        save_json_file("data/approvals.json", curr_approvals, curr_sha, f"Add approval {fname}")
-                except Exception as e:
-                    st.error(f"Failed: {e}")
-
-    with st.expander("💰 Upload Pricelists - 150MB Single File", expanded=False):
-        pl_brand = st.selectbox("Select Brand for Pricelist", brands_data, key="pl_brand")
-        pl_files = st.file_uploader("Choose Pricelist PDFs - Max 150MB", type=["pdf"], accept_multiple_files=True, key="pl_files")
-        if st.button("Upload Pricelist 150MB Single", type="primary", key="up_pl_btn"):
-            for f in pl_files:
-                try:
-                    safe_name = f.name.replace(" ", "_")
-                    file_bytes = f.getvalue()
-                    size_mb = len(file_bytes)/(1024*1024)
-                    fname = f"PRICELIST_{pl_brand}_{safe_name}"
-                    if size_mb > 90:
-                        release = get_or_create_release()
-                        for asset in release.get_assets():
-                            if asset.name == fname:
-                                asset.delete_asset()
-                        # FIXED LINE - NO SPLIT SINGLE FILE
-                        release.upload_asset_from_memory(io.BytesIO(file_bytes), len(file_bytes), fname, "application/pdf")
-                        st.success(f"✅ Pricelist {size_mb:.1f}MB SINGLE FILE to Releases! NO SPLIT!")
-                    else:
-                        path = f"pdfs/{fname}"
-                        try:
-                            existing = repo.get_contents(path)
-                            repo.update_file(path, f"Update {pl_brand}", file_bytes, existing.sha)
-                        except:
-                            repo.create_file(path, f"Add {pl_brand}", file_bytes)
-                        st.success(f"✅ Pricelist SINGLE FILE uploaded!")
+                        save_json_file("data/approvals.json", curr_approvals, curr_sha, f"Add {fname}")
                 except Exception as e:
                     st.error(f"{e}")
 

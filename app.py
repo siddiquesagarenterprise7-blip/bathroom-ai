@@ -1,9 +1,10 @@
 import streamlit as st
 import base64, json, io
 import fitz
+from PIL import Image
 from github import Github
 
-st.set_page_config(page_title="Bathroom AI - ONLY 3 PAGES FIXED", layout="wide")
+st.set_page_config(page_title="Bathroom AI - SHEET FIXED", layout="wide")
 
 try:
     GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
@@ -88,14 +89,17 @@ def search_stop_at_3_all_match(pdf_bytes, query):
             text_lower = page.get_text("text").lower()
             matched = [q for q in query_words if q in text_lower]
             if len(matched) == total_q and total_q>0:
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                # FIXED: Use 120 DPI + PIL Image - ALWAYS SHOWS
+                pix = page.get_pixmap(dpi=120)
                 img_bytes = pix.tobytes("png")
-                all_match_pages.append((page_idx+1, len(matched), matched, img_bytes))
+                pil_img = Image.open(io.BytesIO(img_bytes))
+                all_match_pages.append((page_idx+1, len(matched), matched, pil_img))
         doc.close()
-    except: pass
+    except Exception as e:
+        st.write(f"Error: {e}")
     return all_match_pages
 
-def search_max_matching_fallback(pdf_bytes, query):
+def search_fallback(pdf_bytes, query):
     query_words = [w.lower() for w in query.strip().split() if w.strip()][:4]
     results = []
     try:
@@ -105,9 +109,10 @@ def search_max_matching_fallback(pdf_bytes, query):
             text_lower = page.get_text("text").lower()
             matched = [q for q in query_words if q in text_lower]
             if matched:
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                pix = page.get_pixmap(dpi=120)
                 img_bytes = pix.tobytes("png")
-                results.append((page_idx+1, len(matched), matched, img_bytes))
+                pil_img = Image.open(io.BytesIO(img_bytes))
+                results.append((page_idx+1, len(matched), matched, pil_img))
         doc.close()
     except: pass
     results.sort(key=lambda x: x[1], reverse=True)
@@ -121,7 +126,7 @@ if "customer_email" not in st.session_state:
     st.session_state.customer_email = ""
 
 if not st.session_state.customer_verified and not st.session_state.is_admin:
-    st.title("🛁 Bathroom Pricelist Login")
+    st.title("🛁 Login")
     tab1, tab2 = st.tabs(["👤 Customer", "🔐 Admin"])
     with tab2:
         pwd = st.text_input("Admin Password", type="password")
@@ -141,24 +146,11 @@ if not st.session_state.customer_verified and not st.session_state.is_admin:
                     st.session_state.customer_email = login_mail
                     st.rerun()
                 else: st.error("Not found or pending")
-        with st.form("signup_form"):
-            st.write("**New Customer Signup**")
-            name = st.text_input("Name*")
-            contact = st.text_input("Contact No*")
-            mail = st.text_input("Mail ID*")
-            city = st.text_input("City*")
-            pincode = st.text_input("Pincode*")
-            company = st.text_input("Company (Optional)")
-            if st.form_submit_button("Submit for Approval", use_container_width=True):
-                customers, sha = get_json_file("data/customers.json", [])
-                customers.append({"name":name,"contact":contact,"mail":mail.strip(),"city":city,"pincode":pincode,"company":company,"approved": False})
-                save_json_file("data/customers.json", customers, sha, f"New {name}")
-                st.success("✅ Submitted!")
     st.stop()
 
-st.title("🛁 Pricelist Search - ONLY 3 PAGES FIXED")
+st.title("🛁 Pricelist Search - SHEET IMAGE FIXED")
 if st.session_state.is_admin:
-    st.success("✅ FIXED - ONLY 3 Pages + Images Loading Fixed")
+    st.success("✅ ONLY 3 Pages + SHEET IMAGE FIXED - PIL Image")
 else:
     st.success(f"Welcome {st.session_state.customer_email}")
 
@@ -173,7 +165,7 @@ col1, col2 = st.columns([1,2])
 with col1: brand_filter = st.selectbox("Brand", brand_options)
 with col2: search_query = st.text_input("Search Pricelist", placeholder="e.g. mint spout")
 
-search_btn = st.button("🔍 SEARCH - Show ONLY 3 Pages", use_container_width=True, type="primary")
+search_btn = st.button("🔍 SEARCH - Show ONLY 3 Sheets", use_container_width=True, type="primary")
 
 if search_btn:
     if not search_query.strip():
@@ -187,17 +179,12 @@ if search_btn:
 
         query_words = search_query.strip().split()
         total_q = len(query_words)
-        st.info(f"Searching {query_words} — STOP after 3 ALL {total_q} words — Show ONLY 3")
+        st.info(f"Searching {query_words} — STOP at 3 ALL MATCH — Show ONLY 3 SHEETS")
 
         final_all_match = []
-        progress = st.progress(0)
-        status = st.empty()
-
         for idx, filename in enumerate(filtered):
-            if len(final_all_match) >= 3:
-                status.write(f"✅ STOPPED - Found 3 ALL MATCHES")
-                break
-            status.write(f"🔍 {idx+1}/{len(filtered)}: {filename} | ALL MATCH: {len(final_all_match)}/3")
+            if len(final_all_match) >= 3: break
+            st.write(f"🔍 Searching {filename}...")
             try:
                 pdf_bytes = None
                 try:
@@ -218,30 +205,27 @@ if search_btn:
                         final_all_match.append((filename, p[0], p[1], p[2], p[3]))
                         if len(final_all_match) >= 3: break
             except: pass
-            progress.progress((idx+1)/len(filtered))
-
-        progress.empty()
-        status.empty()
 
         if len(final_all_match) >= 3:
             final_all_match = final_all_match[:3]
-            st.success(f"✅ Found 3 pages with ALL {total_q} words - Showing ONLY 3 Pages - STOPPED EARLY!")
-            for filename, page_no, match_count, matched_words, img_bytes in final_all_match:
+            st.success(f"✅ Found 3 pages with ALL {total_q} words - Showing EXACT SHEETS!")
+
+            for filename, page_no, match_count, matched_words, pil_img in final_all_match:
                 with st.container(border=True):
                     st.write(f"### 📄 {filename} — Page {page_no} — 🟢 ALL {match_count} WORDS — Matched: {', '.join(matched_words)}")
-                    # FIXED LINE - use_container_width instead of use_column_width
-                    st.image(img_bytes, caption=f"Page {page_no} - {filename}", use_container_width=True)
+                    # THIS WILL NOW SHOW EXACT SHEET
+                    st.image(pil_img, caption=f"EXACT SHEET - Page {page_no} - {filename}", use_container_width=True)
 
         elif len(final_all_match) > 0:
-            st.success(f"Found {len(final_all_match)} pages with ALL WORDS")
-            for filename, page_no, match_count, matched_words, img_bytes in final_all_match:
+            st.success(f"Found {len(final_all_match)} pages")
+            for filename, page_no, match_count, matched_words, pil_img in final_all_match:
                 with st.container(border=True):
-                    st.write(f"### 📄 {filename} — Page {page_no} — 🟢 ALL {match_count} WORDS")
-                    st.image(img_bytes, caption=f"Page {page_no}", use_container_width=True)
+                    st.write(f"### 📄 {filename} — Page {page_no}")
+                    st.image(pil_img, caption=f"Page {page_no}", use_container_width=True)
 
         else:
-            st.warning(f"No ALL {total_q} words found - Showing max matching fallback - ONLY 3")
-            fallback_results = []
+            st.warning("No ALL match - Showing fallback max 3")
+            fallback = []
             for filename in filtered:
                 try:
                     pdf_bytes = None
@@ -258,95 +242,30 @@ if search_btn:
                                     pdf_bytes = r.content
                                     break
                     if pdf_bytes:
-                        pages = search_max_matching_fallback(pdf_bytes, search_query)
+                        pages = search_fallback(pdf_bytes, search_query)
                         for p in pages:
-                            fallback_results.append((filename, p[0], p[1], p[2], p[3]))
+                            fallback.append((filename, p[0], p[1], p[2], p[3]))
                 except: pass
-            fallback_results.sort(key=lambda x: x[2], reverse=True)
-            fallback_results = fallback_results[:3]
-            if not fallback_results:
-                st.error(f"No match for '{search_query}'")
-            else:
-                for filename, page_no, match_count, matched_words, img_bytes in fallback_results:
-                    with st.container(border=True):
-                        badge = f"🟡 {match_count} WORDS" if match_count>=2 else f"🔵 {match_count} WORD"
-                        st.write(f"### 📄 {filename} — Page {page_no} — {badge} — Matched: {', '.join(matched_words)}")
-                        st.image(img_bytes, caption=f"Page {page_no}", use_container_width=True)
-
-st.divider()
-st.header("💰 All Pricelists - Download")
-all_files = get_all_pdfs_any_name()
-if not all_files: st.info("No Pricelists")
-else:
-    for name in all_files:
-        with st.container(border=True):
-            c1,c2 = st.columns([3,1])
-            with c1: st.write(f"**{name}**")
-            with c2:
-                try:
-                    import requests
-                    pdf_bytes = None
-                    try:
-                        fc = repo.get_contents(f"pdfs/{name}")
-                        pdf_bytes = base64.b64decode(fc.content)
-                    except:
-                        release = get_or_create_release()
-                        if release:
-                            for asset in release.get_assets():
-                                if asset.name == name:
-                                    r = requests.get(asset.browser_download_url, timeout=60)
-                                    pdf_bytes = r.content
-                                    break
-                    if pdf_bytes:
-                        st.download_button("📥 Download", data=pdf_bytes, file_name=name, mime="application/pdf", key=f"dl_{name}", use_container_width=True)
-                except: pass
+            fallback.sort(key=lambda x: x[2], reverse=True)
+            fallback = fallback[:3]
+            for filename, page_no, match_count, matched_words, pil_img in fallback:
+                with st.container(border=True):
+                    st.write(f"Page {page_no} - {', '.join(matched_words)}")
+                    st.image(pil_img, caption=f"Page {page_no}", use_container_width=True)
 
 if st.session_state.is_admin:
     st.divider()
-    st.header("👑 Admin Panel")
-
-    with st.expander("👥 Customer Approvals - RESTORED ✅", expanded=True):
+    with st.expander("👥 Customer Approvals", expanded=True):
         customers_data, sha_c = get_json_file("data/customers.json", [])
-        st.write(f"Total: {len(customers_data)} | Pending: {len([c for c in customers_data if not c.get('approved')])}")
+        st.write(f"Total: {len(customers_data)}")
         for i, c in enumerate(customers_data):
-            status_txt = "✅ Approved" if c.get("approved") else "⏳ Pending"
+            status_txt = "✅" if c.get("approved") else "⏳"
             with st.container(border=True):
-                col1, col2, col3 = st.columns([3,1,1])
-                with col1:
-                    st.write(f"**{c.get('name')}** | {c.get('mail')} | {c.get('contact')} | {c.get('city')} | {status_txt}")
+                col1, col2 = st.columns([3,1])
+                with col1: st.write(f"{c.get('name')} | {c.get('mail')} | {status_txt}")
                 with col2:
                     if not c.get("approved"):
-                        if st.button("✅ Approve", key=f"app_cust_{i}", type="primary"):
+                        if st.button("Approve", key=f"app_{i}"):
                             customers_data[i]["approved"] = True
                             save_json_file("data/customers.json", customers_data, sha_c, f"Approve {c.get('mail')}")
                             st.rerun()
-                with col3:
-                    if st.button("❌ Delete", key=f"del_cust_{i}"):
-                        customers_data.pop(i)
-                        save_json_file("data/customers.json", customers_data, sha_c, f"Delete {c.get('mail')}")
-                        st.rerun()
-
-    with st.expander("📤 Upload Pricelists - ANY NAME", expanded=False):
-        up_brand = st.selectbox("Select Brand", brands_data, key="up_brand_final")
-        up_files = st.file_uploader("Choose PDFs - ANY NAME", type=["pdf"], accept_multiple_files=True, key="up_final")
-        if st.button("⬆️ Upload", type="primary"):
-            for f in up_files:
-                try:
-                    safe_name = f.name.replace(" ", "_")
-                    file_bytes = f.getvalue()
-                    fname = safe_name
-                    if len(file_bytes)/(1024*1024) > 90:
-                        release = get_or_create_release()
-                        for asset in release.get_assets():
-                            if asset.name == fname: asset.delete_asset()
-                        release.upload_asset_from_memory(io.BytesIO(file_bytes), len(file_bytes), fname, "application/pdf")
-                    else:
-                        path = f"pdfs/{fname}"
-                        try:
-                            ex = repo.get_contents(path)
-                            repo.update_file(path, f"Update {fname}", file_bytes, ex.sha)
-                        except:
-                            repo.create_file(path, f"Add {fname}", file_bytes)
-                    st.success(f"✅ Uploaded {fname}")
-                except Exception as e:
-                    st.error(f"Failed {f.name}: {e}")

@@ -5,12 +5,35 @@ from github import Github
 
 st.set_page_config(page_title="Bathroom AI - FINAL", layout="wide")
 
+st.markdown("""
+<style>
+div[data-baseweb="input"] input {
+    font-size: 22px!important;
+    height: 52px!important;
+    font-weight: 700!important;
+    padding: 14px!important;
+}
+input::placeholder {
+    font-size: 19px!important;
+    font-weight: 500!important;
+}
+div[data-baseweb="select"] div {
+    font-size: 18px!important;
+}
+.stButton button {
+    height: 52px!important;
+    font-size: 18px!important;
+    font-weight: 600!important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 try:
     GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
     GITHUB_REPO_NAME = st.secrets["GITHUB_REPO"]
     ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "Bathroom@123")
 except:
-    st.error("Add Secrets in Streamlit Secrets")
+    st.error("Add Secrets")
     st.stop()
 
 @st.cache_resource
@@ -34,7 +57,7 @@ def save_json_file(path, data, sha, msg):
         if sha: repo.update_file(path, msg, content, sha)
         else:
             try:
-                ex = repo.get_contents(path)
+                ex=repo.get_contents(path)
                 repo.update_file(path, msg, content, ex.sha)
             except: repo.create_file(path, msg, content)
         st.cache_data.clear()
@@ -108,8 +131,7 @@ def get_page_image_cached(fname, page_no):
         if page_no<1 or page_no>len(doc):
             doc.close()
             return None
-        page=doc.load_page(page_no-1)
-        pix=page.get_pixmap(dpi=85, alpha=False)
+        pix=doc.load_page(page_no-1).get_pixmap(dpi=85, alpha=False)
         b=pix.tobytes("png")
         doc.close()
         return b
@@ -150,6 +172,7 @@ if "selected" not in st.session_state: st.session_state.selected=[]
 if "last_results" not in st.session_state: st.session_state.last_results=[]
 if "presentation_images" not in st.session_state: st.session_state.presentation_images={}
 if "page_num" not in st.session_state: st.session_state.page_num=1
+if "presentation_pdf" not in st.session_state: st.session_state.presentation_pdf=None
 
 if st.session_state.last_results and len(st.session_state.last_results)>0:
     first=st.session_state.last_results[0]
@@ -160,14 +183,14 @@ if not st.session_state.customer_verified and not st.session_state.is_admin:
     st.title("🛁 Pricelist Login")
     t1,t2=st.tabs(["Customer","Admin"])
     with t2:
-        pwd=st.text_input("Admin Password", type="password", key="admin_pwd")
+        pwd=st.text_input("Admin Password", type="password")
         if st.button("Login as Admin", type="primary", use_container_width=True):
             if pwd==ADMIN_PASSWORD:
                 st.session_state.is_admin=True
                 st.session_state.customer_verified=True
                 st.rerun()
     with t1:
-        mail=st.text_input("Mail ID", key="login_mail")
+        mail=st.text_input("Mail ID")
         if st.button("Login"):
             cust,_=get_json_file("data/customers.json", [])
             f=next((c for c in cust if c.get("mail","").lower()==mail.lower().strip()), None)
@@ -190,23 +213,23 @@ st.title("Pricelist Search")
 c1,c2=st.columns([3,1])
 with c1: st.markdown(f"**Login:** {st.session_state.customer_email if not st.session_state.is_admin else 'Admin'}")
 with c2:
-    if st.button("Logout", use_container_width=True, key="logout_btn"):
-        st.session_state.customer_verified=False; st.session_state.is_admin=False; st.session_state.last_results=[]; st.session_state.selected=[]; st.session_state.page_num=1
+    if st.button("Logout", use_container_width=True):
+        st.session_state.customer_verified=False; st.session_state.is_admin=False; st.session_state.last_results=[]; st.session_state.selected=[]; st.session_state.page_num=1; st.session_state.presentation_pdf=None
         st.rerun()
 
 s1,s2,s3=st.columns([1,2,1])
 with s1:
     brands,_=get_json_file("data/brands.json", DEFAULT_BRANDS)
-    brand=st.selectbox("Brand", ["All Brands"]+brands, key="brand_select")
+    brand=st.selectbox("Brand", ["All Brands"]+brands)
 with s2:
-    query=st.text_input("Search Pricelist", placeholder="mint spout", key="search_input")
+    query=st.text_input("Search Pricelist", placeholder="Type like: mint spout")
 with s3:
     st.write(""); st.write("")
-    do_search=st.button("🔍 SEARCH ALL MATCHES", type="primary", use_container_width=True, key="search_btn")
+    do_search=st.button("🔍 SEARCH ALL MATCHES", type="primary", use_container_width=True)
 
 if st.session_state.selected:
     st.divider()
-    st.markdown(f"### 🧺 Basket: {len(st.session_state.selected)} sheets - Multi-search keeps")
+    st.markdown(f"### 🧺 Basket: {len(st.session_state.selected)} sheets")
     cols=st.columns(min(6, len(st.session_state.selected)))
     for idx,(fn,pn) in enumerate(st.session_state.selected):
         with cols[idx%6]:
@@ -216,7 +239,9 @@ if st.session_state.selected:
             if st.button("❌", key=f"rem_{fn}_{pn}_{idx}_basket"):
                 st.session_state.selected.remove((fn,pn))
                 st.session_state.presentation_images.pop(f"{fn}_{pn}", None)
+                st.session_state.presentation_pdf=None
                 st.rerun()
+
     if st.button(f"📑 Create PDF ({len(st.session_state.selected)})", type="primary", use_container_width=True, key="create_pdf"):
         try:
             nd=fitz.open()
@@ -228,13 +253,27 @@ if st.session_state.selected:
                     src.close()
             out=nd.tobytes()
             nd.close()
-            st.download_button("📥 Download Presentation.pdf", data=out, file_name="Presentation.pdf", mime="application/pdf", use_container_width=True, key="dl_pres")
+            st.session_state.presentation_pdf = out
+            st.rerun()
         except Exception as e: st.error(str(e))
+
+    if st.session_state.presentation_pdf:
+        st.download_button(
+            "📥 Download Presentation.pdf",
+            data=st.session_state.presentation_pdf,
+            file_name="Presentation.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            type="primary",
+            key="dl_pres_final"
+        )
+        st.caption("Saves to: Phone Files > Downloads OR PC > Downloads")
+
     if st.button("🗑️ Clear Basket", use_container_width=True, key="clear_basket"):
-        st.session_state.selected=[]; st.session_state.presentation_images={}; st.rerun()
+        st.session_state.selected=[]; st.session_state.presentation_images={}; st.session_state.presentation_pdf=None; st.rerun()
 
 if do_search:
-    q=st.session_state.search_input
+    q=query
     if not q or not q.strip():
         st.warning("Type a word")
     else:
@@ -261,25 +300,19 @@ with left:
     for fn in get_allowed_files(st.session_state.customer_email, st.session_state.is_admin):
         with st.container(border=True):
             st.write(f"**{fn}**")
-            pb=get_pdf_bytes_cached(fn)
-            c1,c2=st.columns(2)
-            with c1:
+            a,b=st.columns(2)
+            with a:
                 if st.button("👁️ View", key=f"view_{fn}_left", use_container_width=True):
                     ib=get_page_image_cached(fn, 1)
-                    if ib: st.image(ib, caption="P1", use_container_width=True)
-                    else: st.error("View failed - Retry")
-            with c2:
-                if pb:
-                    st.download_button("📥 Download", data=pb, file_name=fn, mime="application/pdf", key=f"dl_{fn}_left", use_container_width=True)
-                else:
-                    if st.button("🔄 Load", key=f"load_{fn}", use_container_width=True):
-                        st.cache_data.clear()
-                        st.rerun()
+                    if ib: st.image(ib, use_container_width=True)
+                    else: st.error("Failed")
+            with b:
+                pb=get_pdf_bytes_cached(fn)
+                if pb: st.download_button("📥 Download", data=pb, file_name=fn, mime="application/pdf", key=f"dl_{fn}_left", use_container_width=True)
     st.divider()
     cust_data,sha_c=get_json_file("data/customers.json", [])
     pend=[c for c in cust_data if not c.get("approved")]
     if pend and st.session_state.is_admin:
-        st.toast(f"🔴 {len(pend)} pending!", icon="🔔")
         st.markdown(f"### Pending: 🔴 {len(pend)} NEW")
     else: st.markdown("### Pending Customers approval:")
     for i,c in enumerate(cust_data):
@@ -291,15 +324,10 @@ with left:
                         cust_data[i]["approved"]=True
                         save_json_file("data/customers.json", cust_data, sha_c, "approve")
                         st.rerun()
-    st.divider()
-    st.markdown("### List of Customers:")
-    for c in cust_data:
-        if c.get("approved"):
-            st.write(f"• {c.get('name')} - {c.get('mail')}")
 
 with right:
     if not st.session_state.last_results:
-        st.info("Search ALL pages - 6 per page - Images cached + Download fixed")
+        st.info("Search shows ALL - 6 per page - Images cached")
     else:
         results=st.session_state.last_results
         st.success(f"Found {len(results)} pages - 6 per page")
@@ -320,11 +348,9 @@ with right:
             pg=st.session_state.page_num
             start=(pg-1)*page_size
             display=results[start:start+page_size]
-            st.caption(f"Showing {start+1}-{min(start+page_size, len(results))} of {len(results)}")
         else:
             pg=1
             display=results
-
         cols=st.columns(3)
         for idx in range(6):
             col=cols[idx%3]
@@ -333,13 +359,8 @@ with right:
                     fn,pn,mc,matched=display[idx]
                     with st.container(border=True):
                         img=get_page_image_cached(fn, pn)
-                        if img:
-                            st.image(img, use_container_width=True)
-                        else:
-                            st.error(f"Image loading P{pn}... Click Retry")
-                            if st.button("Retry Image", key=f"retry_img_{fn}_{pn}_{idx}_{pg}"):
-                                st.cache_data.clear()
-                                st.rerun()
+                        if img: st.image(img, use_container_width=True)
+                        else: st.warning(f"Loading P{pn}...")
                         st.markdown(f"**Page {pn}**")
                         st.caption(f"{fn}")
                         st.write(f"ALL {mc}: {', '.join(matched)}")
@@ -380,10 +401,9 @@ if st.session_state.is_admin:
                 blist.append(nb.strip())
                 save_json_file("data/brands.json", blist, sha_b, f"Add {nb}")
                 st.rerun()
-    with st.expander("📤 Upload Pricelists - FIXED 409/422", expanded=True):
-        st.info("All files via Release (2GB) - No repo 25MB limit")
+    with st.expander("📤 Upload Pricelists", expanded=True):
         ups=st.file_uploader("Choose PDFs", type=["pdf"], accept_multiple_files=True, key="uploader_final_fix")
-        if st.button("⬆️ Upload - FIXED", type="primary", use_container_width=True, key="upload_btn_final_fix"):
+        if st.button("⬆️ Upload", type="primary", use_container_width=True, key="upload_btn_final_fix"):
             if not ups: st.warning("Select files")
             else:
                 rel=get_or_create_release()
@@ -403,6 +423,6 @@ if st.session_state.is_admin:
                             acc,sha_acc=get_json_file("data/file_access.json", {})
                             acc[safe]=["all"]
                             save_json_file("data/file_access.json", acc, sha_acc, "default")
-                            st.success(f"✅ {safe} - {mb:.1f}MB uploaded!")
+                            st.success(f"✅ {safe}")
                         except Exception as e: st.error(f"❌ {safe}: {e}")
                     st.rerun()

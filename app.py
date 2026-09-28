@@ -1,16 +1,16 @@
 import streamlit as st
-import base64, json, io
+import base64, json, io, requests
 import fitz
 from github import Github
 
-st.set_page_config(page_title="Bathroom AI - FINAL NO 422", layout="wide")
+st.set_page_config(page_title="Bathroom AI - FINAL", layout="wide")
 
 try:
     GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
     GITHUB_REPO_NAME = st.secrets["GITHUB_REPO"]
     ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "Bathroom@123")
 except:
-    st.error("Add Secrets")
+    st.error("Add Secrets in Streamlit Secrets")
     st.stop()
 
 @st.cache_resource
@@ -34,7 +34,7 @@ def save_json_file(path, data, sha, msg):
         if sha: repo.update_file(path, msg, content, sha)
         else:
             try:
-                ex=repo.get_contents(path)
+                ex = repo.get_contents(path)
                 repo.update_file(path, msg, content, ex.sha)
             except: repo.create_file(path, msg, content)
         st.cache_data.clear()
@@ -54,10 +54,8 @@ def get_or_create_release():
     try:
         for r in repo.get_releases():
             if r.tag_name=="pdfs-storage": return r
-        return repo.create_git_release(tag="pdfs-storage", name="PDF Storage", message="150MB", draft=False, prerelease=False)
-    except Exception as e:
-        st.error(f"Release error: {e}")
-        return None
+        return repo.create_git_release(tag="pdfs-storage", name="PDF Storage", message="storage", draft=False, prerelease=False)
+    except: return None
 
 def get_all_pdfs():
     files=[]
@@ -78,28 +76,40 @@ def get_pdf_bytes_cached(fname):
     try:
         fc=repo.get_contents(f"pdfs/{fname}")
         return base64.b64decode(fc.content)
-    except:
-        try:
-            rel=get_or_create_release()
-            if rel:
-                import requests
-                for a in rel.get_assets():
-                    if a.name==fname:
-                        r=requests.get(a.browser_download_url, timeout=120)
-                        if r.status_code==200: return r.content
-        except: pass
+    except: pass
+    try:
+        rel=get_or_create_release()
+        if rel:
+            for a in rel.get_assets():
+                if a.name==fname:
+                    try:
+                        headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/octet-stream"}
+                        r=requests.get(a.url, headers=headers, timeout=180, allow_redirects=True)
+                        if r.status_code==200 and len(r.content)>1000: return r.content
+                    except: pass
+                    try:
+                        headers={"Authorization": f"token {GITHUB_TOKEN}"}
+                        r=requests.get(a.browser_download_url, headers=headers, timeout=180)
+                        if r.status_code==200 and len(r.content)>1000: return r.content
+                    except: pass
+                    try:
+                        r=requests.get(a.browser_download_url, timeout=180)
+                        if r.status_code==200 and len(r.content)>1000: return r.content
+                    except: pass
+    except: pass
     return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_page_image_cached(fname, page_no):
     try:
-        pb = get_pdf_bytes_cached(fname)
+        pb=get_pdf_bytes_cached(fname)
         if not pb: return None
         doc=fitz.open(stream=pb, filetype="pdf")
         if page_no<1 or page_no>len(doc):
             doc.close()
             return None
-        pix=doc.load_page(page_no-1).get_pixmap(dpi=80, alpha=False)
+        page=doc.load_page(page_no-1)
+        pix=page.get_pixmap(dpi=85, alpha=False)
         b=pix.tobytes("png")
         doc.close()
         return b
@@ -196,7 +206,7 @@ with s3:
 
 if st.session_state.selected:
     st.divider()
-    st.markdown(f"### 🧺 Basket: {len(st.session_state.selected)} sheets")
+    st.markdown(f"### 🧺 Basket: {len(st.session_state.selected)} sheets - Multi-search keeps")
     cols=st.columns(min(6, len(st.session_state.selected)))
     for idx,(fn,pn) in enumerate(st.session_state.selected):
         with cols[idx%6]:
@@ -251,15 +261,20 @@ with left:
     for fn in get_allowed_files(st.session_state.customer_email, st.session_state.is_admin):
         with st.container(border=True):
             st.write(f"**{fn}**")
-            a,b=st.columns(2)
-            with a:
+            pb=get_pdf_bytes_cached(fn)
+            c1,c2=st.columns(2)
+            with c1:
                 if st.button("👁️ View", key=f"view_{fn}_left", use_container_width=True):
                     ib=get_page_image_cached(fn, 1)
-                    if ib: st.image(ib, use_container_width=True)
-                    else: st.error("No preview - bytes missing")
-            with b:
-                pb=get_pdf_bytes_cached(fn)
-                if pb: st.download_button("📥 Download", data=pb, file_name=fn, mime="application/pdf", key=f"dl_{fn}_left", use_container_width=True)
+                    if ib: st.image(ib, caption="P1", use_container_width=True)
+                    else: st.error("View failed - Retry")
+            with c2:
+                if pb:
+                    st.download_button("📥 Download", data=pb, file_name=fn, mime="application/pdf", key=f"dl_{fn}_left", use_container_width=True)
+                else:
+                    if st.button("🔄 Load", key=f"load_{fn}", use_container_width=True):
+                        st.cache_data.clear()
+                        st.rerun()
     st.divider()
     cust_data,sha_c=get_json_file("data/customers.json", [])
     pend=[c for c in cust_data if not c.get("approved")]
@@ -276,10 +291,15 @@ with left:
                         cust_data[i]["approved"]=True
                         save_json_file("data/customers.json", cust_data, sha_c, "approve")
                         st.rerun()
+    st.divider()
+    st.markdown("### List of Customers:")
+    for c in cust_data:
+        if c.get("approved"):
+            st.write(f"• {c.get('name')} - {c.get('mail')}")
 
 with right:
     if not st.session_state.last_results:
-        st.info("Search ALL pages - 6 per page - Images cached - Won't disappear")
+        st.info("Search ALL pages - 6 per page - Images cached + Download fixed")
     else:
         results=st.session_state.last_results
         st.success(f"Found {len(results)} pages - 6 per page")
@@ -300,9 +320,11 @@ with right:
             pg=st.session_state.page_num
             start=(pg-1)*page_size
             display=results[start:start+page_size]
+            st.caption(f"Showing {start+1}-{min(start+page_size, len(results))} of {len(results)}")
         else:
             pg=1
             display=results
+
         cols=st.columns(3)
         for idx in range(6):
             col=cols[idx%3]
@@ -311,10 +333,16 @@ with right:
                     fn,pn,mc,matched=display[idx]
                     with st.container(border=True):
                         img=get_page_image_cached(fn, pn)
-                        if img: st.image(img, use_container_width=True)
-                        else: st.warning(f"Loading P{pn}...")
+                        if img:
+                            st.image(img, use_container_width=True)
+                        else:
+                            st.error(f"Image loading P{pn}... Click Retry")
+                            if st.button("Retry Image", key=f"retry_img_{fn}_{pn}_{idx}_{pg}"):
+                                st.cache_data.clear()
+                                st.rerun()
+                        st.markdown(f"**Page {pn}**")
                         st.caption(f"{fn}")
-                        st.write(f"Page {pn} - ALL {mc}: {', '.join(matched)}")
+                        st.write(f"ALL {mc}: {', '.join(matched)}")
                         is_sel=(fn,pn) in st.session_state.selected
                         if st.checkbox("Add to Basket", key=f"chk_{fn}_{pn}_{idx}_{pg}_{st.session_state.page_num}_cb", value=is_sel):
                             if (fn,pn) not in st.session_state.selected:
@@ -352,37 +380,29 @@ if st.session_state.is_admin:
                 blist.append(nb.strip())
                 save_json_file("data/brands.json", blist, sha_b, f"Add {nb}")
                 st.rerun()
-
-    # FIXED UPLOAD - 100% RELEASE ONLY - NO 409 NO 422
-    with st.expander("📤 Upload Pricelists - FIXED NO 409/422", expanded=True):
-        st.info("All files upload via Release (2GB limit) - No repo limit - No 409/422 error")
+    with st.expander("📤 Upload Pricelists - FIXED 409/422", expanded=True):
+        st.info("All files via Release (2GB) - No repo 25MB limit")
         ups=st.file_uploader("Choose PDFs", type=["pdf"], accept_multiple_files=True, key="uploader_final_fix")
-        if st.button("⬆️ Upload - FIXED METHOD", type="primary", use_container_width=True, key="upload_btn_final_fix"):
-            if not ups:
-                st.warning("Select files first")
+        if st.button("⬆️ Upload - FIXED", type="primary", use_container_width=True, key="upload_btn_final_fix"):
+            if not ups: st.warning("Select files")
             else:
                 rel=get_or_create_release()
-                if not rel:
-                    st.error("Cannot get Release")
+                if not rel: st.error("No Release")
                 else:
                     for f in ups:
-                        safe=f.name.replace(" ","_").replace("__","_")
+                        safe=f.name.replace(" ","_")
                         fb=f.getvalue()
                         mb=len(fb)/(1024*1024)
-                        st.write(f"⏳ Uploading {safe} - {mb:.2f} MB to Release...")
+                        st.write(f"Uploading {safe} {mb:.1f}MB...")
                         try:
-                            # Delete old if exists
                             for a in rel.get_assets():
                                 if a.name==safe:
                                     try: a.delete_asset()
                                     except: pass
-                            # Upload to Release - THIS NEVER GIVES 422
                             rel.upload_asset_from_memory(io.BytesIO(fb), len(fb), safe, "application/pdf")
                             acc,sha_acc=get_json_file("data/file_access.json", {})
                             acc[safe]=["all"]
                             save_json_file("data/file_access.json", acc, sha_acc, "default")
-                            st.success(f"✅ {safe} - {mb:.1f}MB uploaded successfully!")
-                        except Exception as e:
-                            st.error(f"❌ {safe} failed: {e}")
-                    st.balloons()
+                            st.success(f"✅ {safe} - {mb:.1f}MB uploaded!")
+                        except Exception as e: st.error(f"❌ {safe}: {e}")
                     st.rerun()

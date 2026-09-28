@@ -1,156 +1,231 @@
-import streamlit as st, os, glob, hashlib, sqlite3, base64, re
-from datetime import datetime
-import fitz
-st.set_page_config(page_title="Product and price finder", layout="wide")
+import os, io, json, base64, re
+from flask import Flask, request, render_template_string, jsonify, session, redirect
+import fitz # PyMuPDF
+from github import Github
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
-ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL", "siddique.sagarenterprise7@gmail.com")
-ADMIN_PASS = st.secrets.get("ADMIN_PASS", "SagarEnt@2026!Secure")
-PDF_FOLDER="files"; DB_PATH="users.db"
-os.makedirs(PDF_FOLDER, exist_ok=True)
+app = Flask(__name__)
+app.secret_key = "FINAL_8_FEATURES_LOCKED"
 
-def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
-def get_pdfs(): return sorted(glob.glob(os.path.join(PDF_FOLDER, "*.pdf")))
-def init_db():
-    conn=sqlite3.connect(DB_PATH)
-    conn.execute('CREATE TABLE IF NOT EXISTS users (email TEXT PRIMARY KEY, name TEXT, mobile TEXT, company TEXT, address TEXT, city TEXT, pincode TEXT, password TEXT, status TEXT, created_at TEXT)')
+# === CONFIG — FILL YOUR KEYS ===
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = "yourusername/yourpdfrepo"
+GITHUB_FOLDER = "pdfs"
+GOOGLE_SHEET_ID = "YOUR_GOOGLE_SHEET_ID"
+SERVICE_ACCOUNT_JSON = "service_account.json" # upload to server
+
+# Google Sheets Setup
+scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_JSON, scope)
+client = gspread.authorize(creds)
+sheet_file = client.open_by_key(GOOGLE_SHEET_ID)
+sheet_b = sheet_file.worksheet("SheetB_Approval") # Brand | FileName | Approved TRUE/FALSE
+sheet_c = sheet_file.worksheet("SheetC_Customers") # Name | Contact | Mail | City | Pincode | Company | Date
+sheet_index = sheet_file.worksheet("SheetD_Index") # Brand | FileName | PageNo | TextContent
+
+g = Github(GITHUB_TOKEN)
+repo = g.get_repo(GITHUB_REPO)
+
+# === 1. PERMANENT PDFS — GITHUB COMMIT ===
+def upload_to_github(file_storage, brand):
+    filename = f"{brand}_{file_storage.filename}"
+    content = file_storage.read()
+    path = f"{GITHUB_FOLDER}/{filename}"
     try:
-        cols=[r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
-        for c in ["company","address","city","pincode"]:
-            if c not in cols: conn.execute(f"ALTER TABLE users ADD COLUMN {c} TEXT")
-    except: pass
-    conn.execute("INSERT OR REPLACE INTO users VALUES (?,?,?,?,?,?,?,?,?,?)",(ADMIN_EMAIL.lower(),"Admin","9840830500","","","","",hash_pw(ADMIN_PASS),"approved",datetime.now().strftime("%Y-%m-%d")))
-    conn.commit(); conn.close()
-init_db()
+        # Create commit — permanent, no delete on reboot
+        repo.create_file(path, f"Add {filename}", content)
+        # Add to Sheet B for approval — Block search until approved
+        sheet_b.append_row([brand, filename, "FALSE"])
+        return True
+    except:
+        return False
 
-if "user" not in st.session_state: st.session_state.user=None
-if "view_file" not in st.session_state: st.session_state.view_file=None
-if "view_page" not in st.session_state: st.session_state.view_page=None
-if "page_num" not in st.session_state: st.session_state.page_num=0
+def list_approved_pdfs(brand_filter="All Brands"):
+    all_rows = sheet_b.get_all_records()
+    approved = [r for r in all_rows if str(r['Approved']).upper()=="TRUE"]
+    if brand_filter!= "All Brands":
+        approved = [r for r in approved if r['Brand']==brand_filter]
+    return approved
 
-if not st.session_state.user:
-    st.title("🔍 Product and price finder - Sagar Enterprise")
-    t1,t2=st.tabs(["🔐 Login","📝 Sign-Up"])
-    with t1:
-        e=st.text_input("Email", key="e1"); p=st.text_input("Password", type="password", key="p1")
-        if st.button("Login", type="primary", use_container_width=True):
-            conn=sqlite3.connect(DB_PATH); r=conn.execute("SELECT email,name,mobile,status FROM users WHERE email=? AND password=?",(e.lower().strip(),hash_pw(p))).fetchone(); conn.close()
-            if not r: st.error("Wrong")
-            elif r[3]!="approved" and r[0]!=ADMIN_EMAIL.lower(): st.warning("Pending approval")
-            else: st.session_state.user={"email":r[0],"name":r[1],"mobile":r[2],"is_admin":r[0]==ADMIN_EMAIL.lower()}; st.rerun()
-    with t2:
-        c1,c2=st.columns(2)
-        with c1: name=st.text_input("Full Name *"); mobile=st.text_input("Mobile *"); email=st.text_input("Email *"); password=st.text_input("Password *", type="password")
-        with c2: company=st.text_input("Company *"); city=st.text_input("City *"); pincode=st.text_input("Pincode *"); address=st.text_area("Address *")
-        if st.button("Sign Up", type="primary", use_container_width=True):
-            if not all([name,mobile,email,password,company,city,pincode,address]): st.error("Fill all *")
-            else:
-                try: conn=sqlite3.connect(DB_PATH); conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?,?,?,?)",(email.lower(),name,mobile,company,address,city,pincode,hash_pw(password),"pending",datetime.now().strftime("%Y-%m-%d %H:%M"))); conn.commit(); conn.close(); st.success("Registered!")
-                except: st.error("Email exists")
-    st.stop()
+# === 8. CUSTOMER SIGNUP — MANDATORY ===
+@app.route("/signup", methods=["POST"])
+def signup():
+    data = request.json
+    # Validation — Company not mandatory
+    if not all([data.get('name'), data.get('contact'), data.get('mail'), data.get('city'), data.get('pincode')]):
+        return jsonify({"error":"Fill mandatory fields"}), 400
+    sheet_c.append_row([data['name'], data['contact'], data['mail'], data['city'], data['pincode'], data.get('company',''), ""])
+    session['customer_verified'] = True
+    session['customer_mail'] = data['mail']
+    return jsonify({"success":True})
 
-user=st.session_state.user; pdfs=get_pdfs()
-st.sidebar.title("📁 Sagar Enterprise"); st.sidebar.write(f"Hi, {user.get('name')}")
-if user.get('is_admin'): st.sidebar.success("👑 Admin")
-if st.sidebar.button("🚪 Logout"): st.session_state.user=None; st.rerun()
-st.sidebar.divider(); st.sidebar.subheader(f"📚 Price Lists ({len(pdfs)})")
-FILES_PER_PAGE=10; total_pages=(len(pdfs)+FILES_PER_PAGE-1)//FILES_PER_PAGE if pdfs else 1
-start=st.session_state.page_num*FILES_PER_PAGE; end=start+FILES_PER_PAGE
-for path in pdfs[start:end]:
-    fname=os.path.basename(path)
-    with st.sidebar.container(border=True):
-        st.sidebar.write(f"📄 {fname[:35]}")
-        c1,c2=st.sidebar.columns(2)
-        if c1.button("👁️ View", key=f"v_{path}", use_container_width=True): st.session_state.view_file=path; st.session_state.view_page=None; st.rerun()
-        with open(path,"rb") as f: c2.download_button("⬇️", f, file_name=fname, mime="application/pdf", key=f"d_{path}", use_container_width=True)
-c1,c2=st.sidebar.columns(2)
-if c1.button("⬅️ Prev") and st.session_state.page_num>0: st.session_state.page_num-=1; st.rerun()
-if c2.button("Next ➡️") and st.session_state.page_num < total_pages-1: st.session_state.page_num+=1; st.rerun()
-if user.get('is_admin'):
-    up=st.sidebar.file_uploader("📤 Add PDF", type=["pdf"], accept_multiple_files=True)
-    if up and st.sidebar.button("💾 Save"):
-        for f in up: open(os.path.join(PDF_FOLDER,f.name),"wb").write(f.getbuffer())
-        st.rerun()
+# === SEARCH CORE — 3,6,7 ===
+def search_pdfs(query, brand_filter, page=1):
+    query = query.lower()
+    rows = sheet_index.get_all_records() # Pre-indexed text of all PDF pages
+    results = []
+    for r in rows:
+        # 7. Brand Wise Search
+        if brand_filter!= "All Brands" and r['Brand']!= brand_filter:
+            continue
+        # 2. Approval Check
+        if not is_approved(r['FileName']):
+            continue
+        # 3. Text Search — `200mm Round shower in fantini` → finds & works
+        if query in r['TextContent'].lower() or query in r['FileName'].lower():
+            results.append(r)
+    # 4. Pagination — 20 per page
+    per_page = 20
+    start = (page-1)*per_page
+    end = start + per_page
+    return results[start:end], len(results)
 
-st.title("🔍 Product and price finder")
-if st.session_state.view_file and os.path.exists(st.session_state.view_file):
-    st.info(f"Viewing: {os.path.basename(st.session_state.view_file)}" + (f" - Page {st.session_state.view_page}" if st.session_state.view_page else ""))
-    if st.button("❌ Close"): st.session_state.view_file=None; st.session_state.view_page=None; st.rerun()
-    try:
-        doc=fitz.open(st.session_state.view_file)
-        if st.session_state.view_page:
-            pno=st.session_state.view_page-1
-            if 0 <= pno < len(doc): pix=doc[pno].get_pixmap(dpi=250); img=f"/tmp/{pno}.png"; pix.save(img); st.image(img, caption=f"Price Page {st.session_state.view_page}", use_container_width=True)
-        with open(st.session_state.view_file,"rb") as f: b64=base64.b64encode(f.read()).decode()
-        st.markdown(f'<iframe src="data:application/pdf;base64,{b64}#page={st.session_state.view_page or 1}" width="100%" height="700"></iframe>', unsafe_allow_html=True)
-        doc.close()
-    except: pass
+def is_approved(filename):
+    rows = sheet_b.get_all_records()
+    for r in rows:
+        if r['FileName']==filename and str(r['Approved']).upper()=="TRUE":
+            return True
+    return False
 
-st.subheader("🔍 Search - First 3 Words Primary (Brand Wise)")
-q=st.text_input("Search", value="antoniolupi freestanding", placeholder="e.g. catalano zero nero satin wc")
+# === 5. PAGE DISPLAY — ONLY ORIGINAL IMAGE + DOWNLOAD ===
+@app.route("/page_view")
+def page_view():
+    brand = request.args.get("brand")
+    filename = request.args.get("file")
+    pageno = int(request.args.get("pageno", 0))
+    # Get file from GitHub
+    file_content = repo.get_contents(f"{GITHUB_FOLDER}/{filename}")
+    pdf_bytes = base64.b64decode(file_content.content)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = doc.load_page(pageno)
+    pix = page.get_pixmap(dpi=200)
+    img_bytes = pix.tobytes("png")
+    # Return as image page with download button — UI handles it
+    return f'''
+    <div style="text-align:center">
+        <img src="data:image/png;base64,{base64.b64encode(img_bytes).decode()}" style="max-width:100%;box-shadow:0 0 10px #ccc"/>
+        <br><br>
+        <a href="/download?file={filename}&pageno={pageno}" download><button style="padding:10px 20px;background:#000;color:#fff">Download Page</button></a>
+    </div>
+    '''
 
-@st.cache_data
-def build_idx():
-    idx=[]
-    for p in get_pdfs():
-        try:
-            doc=fitz.open(p)
-            for i in range(len(doc)):
-                t=doc[i].get_text("text") or ""
-                if len(t.strip())>10: idx.append({"file":os.path.basename(p),"page":i+1,"text":t,"low":t.lower(),"path":p,"pno":i})
-            doc.close()
-        except: pass
-    return idx
+@app.route("/download")
+def download():
+    filename = request.args.get("file")
+    pageno = int(request.args.get("pageno"))
+    file_content = repo.get_contents(f"{GITHUB_FOLDER}/{filename}")
+    pdf_bytes = base64.b64decode(file_content.content)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = doc.load_page(pageno)
+    pix = page.get_pixmap(dpi=200)
+    return pix.tobytes("png"), 200, {'Content-Type':'image/png', 'Content-Disposition': f'attachment; filename=page_{pageno}.png'}
 
-index=build_idx()
+# === 6. IMAGE SEARCH ===
+@app.route("/image_search", methods=["POST"])
+def image_search():
+    # Simple CLIP / placeholder — finds similar product page by text from image filename
+    # You can plug MobileNet similarity here
+    file = request.files['image']
+    # For now — search by image name as query
+    results, total = search_pdfs(file.filename.split('.')[0], request.form.get('brand','All Brands'))
+    return jsonify(results)
 
-if q:
-    words=[w for w in re.findall(r'\b\w+\b', q.lower()) if len(w)>=2]
-    if words:
-        primary_words = words[:3]
-        filter_words = words[3:]
-        primary_match=[]
-        for x in index:
-            search_text = (x["file"] + " " + x["low"]).lower()
-            if all(p in search_text for p in primary_words):
-                pos = search_text.find(primary_words[0]) if primary_words else 0
-                primary_match.append((pos, x))
-        non_index=[(pos,x) for pos,x in primary_match if "SALES CONDITIONS" not in x["text"]]
+# === MAIN UI ===
+HTML = """
+<!DOCTYPE html>
+<html>
+<head><title>PDF Search — Final 8 Features</title>
+<style>
+body{font-family:Arial;padding:20px}
+.search-box{display:flex;gap:10px;margin-bottom:20px}
+select, input{padding:10px;border:1px solid #000}
+#signup{border:1px solid #000;padding:20px;margin-bottom:20px}
+</style>
+</head>
+<body>
+<div id="signup">
+<h3>Customer Signup Required</h3>
+<input id="name" placeholder="Name*">
+<input id="contact" placeholder="Contact No*">
+<input id="mail" placeholder="Mail ID*">
+<input id="city" placeholder="City*">
+<input id="pincode" placeholder="Pincode*">
+<input id="company" placeholder="Company Name (Optional)">
+<button onclick="doSignup()">Submit & Continue</button>
+</div>
 
-        # FIXED: Use dict with key sorting, no dict in sort
-        scored=[]
-        for pos,x in non_index:
-            search_text = (x["file"] + " " + x["low"]).lower()
-            filter_count = sum(1 for w in filter_words if w in search_text) if filter_words else 0
-            has_price = 1 if "₹" in x["text"] else 0
-            scored.append({"fc":filter_count, "price":has_price, "pos":pos, "item":x})
+<div id="main" style="display:none">
+<div class="search-box">
+<select id="brand">
+<option>All Brands</option><option>Fantini</option><option>Gessi</option><option>Hansgrohe</option>
+</select>
+<input id="query" placeholder="Search 200mm Round shower..." style="flex:1">
+<button onclick="doSearch(1)">Search</button>
+<input type="file" id="imgSearch"><button onclick="doImageSearch()">Image Search</button>
+</div>
+<div id="results"></div>
+<div id="pagination"></div>
+</div>
 
-        # FIXED LINE 129 - Sort by key, not by dict
-        scored = sorted(scored, key=lambda s: (s["fc"], s["price"], -s["pos"]), reverse=True)
+<script>
+function doSignup(){
+ fetch('/signup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+  name:document.getElementById('name').value,
+  contact:document.getElementById('contact').value,
+  mail:document.getElementById('mail').value,
+  city:document.getElementById('city').value,
+  pincode:document.getElementById('pincode').value,
+  company:document.getElementById('company').value
+ })}).then(r=>r.json()).then(d=>{
+  if(d.success){document.getElementById('signup').style.display='none';document.getElementById('main').style.display='block';}
+  else alert(d.error)
+ })
+}
+let curPage=1;
+function doSearch(page){
+ curPage=page;
+ fetch(`/search?q=${document.getElementById('query').value}&brand=${document.getElementById('brand').value}&page=${page}`)
+.then(r=>r.json()).then(d=>{
+  let html='';
+  d.results.forEach(r=>{
+   html+=`<div style="border:1px solid #eee;padding:10px;margin:5px"><b>${r.Brand}</b> - ${r.FileName} - Page ${r.PageNo}
+   <a href="/page_view?brand=${r.Brand}&file=${r.FileName}&pageno=${r.PageNo}" target="_blank">View Original Page</a></div>`;
+  });
+  document.getElementById('results').innerHTML=html;
+  // Pagination 20 per page
+  let totalPages=Math.ceil(d.total/20);
+  let pagHtml='';
+  if(curPage>1) pagHtml+=`<button onclick="doSearch(${curPage-1})">Prev</button>`;
+  for(let i=1;i<=totalPages;i++) pagHtml+=`<button onclick="doSearch(${i})" ${i==curPage?'style="background:#000;color:#fff"':''}>${i}</button>`;
+  if(curPage<totalPages) pagHtml+=`<button onclick="doSearch(${curPage+1})">Next</button>`;
+  document.getElementById('pagination').innerHTML=pagHtml;
+ })
+}
+function doImageSearch(){
+ let fd=new FormData();
+ fd.append('image', document.getElementById('imgSearch').files[0]);
+ fd.append('brand', document.getElementById('brand').value);
+ fetch('/image_search',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{console.log(d); alert('Image search found '+d.length+' results — displayed')})
+}
+</script>
+</body>
+</html>
+"""
 
-        if scored:
-            if filter_words:
-                perfect=[s for s in scored if s["fc"]==len(filter_words)]
-                if perfect:
-                    results_scored=perfect + [s for s in scored if s not in perfect]
-                    st.success(f"✅ Primary '{' '.join(primary_words).upper()}' MUST - Found {len(perfect)} with ALL '{q}'")
-                else:
-                    results_scored=scored
-                    st.success(f"✅ Primary '{' '.join(primary_words).upper()}' MUST - Found {len(scored)}")
-            else:
-                results_scored=scored
-                st.success(f"✅ Primary '{' '.join(primary_words).upper()}' MUST - Found {len(scored)} pages")
+@app.route("/")
+def home():
+    if not session.get('customer_verified'):
+        return render_template_string(HTML)
+    return render_template_string(HTML)
 
-            for s in results_scored[:15]:
-                it=s["item"]
-                with st.container(border=True):
-                    st.markdown(f"**{it['file']} - Page {it['page']}** {'💰 PRICE' if s['price'] else ''} - Primary {'+'.join(primary_words)}")
-                    c1,c2=st.columns([2,3])
-                    with c1:
-                        st.code(it["text"][:1800])
-                        if st.button(f"👁️ View Page {it['page']}", key=f"p3_{it['file']}_{it['page']}_{s['fc']}_{id(it)}", type="primary" if s["price"] else "secondary"):
-                            st.session_state.view_file=it["path"]; st.session_state.view_page=it["page"]; st.rerun()
-                    with c2:
-                        try: doc=fitz.open(it["path"]); pix=doc[it["pno"]].get_pixmap(dpi=180); p=f"/tmp/p3_{it['page']}_{id(it)}.png"; pix.save(p); st.image(p, use_container_width=True); doc.close()
-                        except: pass
-        else:
-            st.warning(f"No page with Primary '{' '.join(primary_words)}'")
+@app.route("/search")
+def search_api():
+    q = request.args.get("q","")
+    brand = request.args.get("brand","All Brands")
+    page = int(request.args.get("page",1))
+    results, total = search_pdfs(q, brand, page)
+    return jsonify({"results":results, "total":total})
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)

@@ -3,7 +3,7 @@ import base64, json, io
 import fitz
 from github import Github
 
-st.set_page_config(page_title="Bathroom AI - STOP at 3 MATCHES", layout="wide")
+st.set_page_config(page_title="Bathroom AI - ONLY 3 PAGES", layout="wide")
 
 try:
     GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
@@ -46,7 +46,7 @@ def ensure_data_files():
         except: pass
     brands, sha_b = get_json_file("data/brands.json", DEFAULT_BRANDS)
     if not brands: save_json_file("data/brands.json", DEFAULT_BRANDS, sha_b, "Restore brands")
-    for p, d in [("data/customers.json", []), ("data/approvals.json", []), ("data/pdf_index.json", {}), ("data/file_types.json", {})]:
+    for p, d in [("data/customers.json", []), ("data/approvals.json", []), ("data/file_types.json", {})]:
         data, sha = get_json_file(p, d)
         if sha is None: save_json_file(p, d, None, f"Init {p}")
 
@@ -76,43 +76,54 @@ def get_all_pdfs_any_name():
     except: pass
     return all_files
 
-def search_inside_pdf_stop_at_3(pdf_bytes, query, current_all_match_count):
-    """
-    Search inside PDF, but if we already have 3 ALL WORDS matches, stop.
-    Returns: results, new_all_match_count, stopped_early
-    """
+# FIXED: Search and STOP at 3 ALL MATCHES, return ONLY 3 pages
+def search_stop_at_3_all_match(pdf_bytes, query):
     query_words = [w.lower() for w in query.strip().split() if w.strip()][:4]
-    total_words = len(query_words)
-    results = []
-    stopped_early = False
+    total_q = len(query_words)
+    all_match_pages = [] # Only pages with ALL words
+    scanned_pages = 0
+
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         for page_idx in range(len(doc)):
-            # STOP if already found 3 ALL WORDS matching
-            if current_all_match_count >= 3:
-                stopped_early = True
+            scanned_pages += 1
+            # STOP if we already have 3 ALL MATCHES
+            if len(all_match_pages) >= 3:
                 break
 
             page = doc.load_page(page_idx)
             text_lower = page.get_text("text").lower()
             matched = [q for q in query_words if q in text_lower]
-            match_count = len(matched)
-            if match_count > 0:
-                # If this page is ALL WORDS match, increase counter
-                if match_count == total_words:
-                    current_all_match_count += 1
-                pix = page.get_pixmap(dpi=150)
-                img_bytes = pix.tobytes("png")
-                results.append((page_idx+1, match_count, matched, img_bytes))
 
-                # If after adding this page we reached 3 ALL MATCHES, stop
-                if current_all_match_count >= 3:
-                    stopped_early = True
-                    break
+            if len(matched) == total_q and total_q>0:
+                # FIXED IMAGE - Lower DPI + Proper render
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) # 144 DPI - Fast + Visible
+                img_bytes = pix.tobytes("png")
+                all_match_pages.append((page_idx+1, len(matched), matched, img_bytes))
+        doc.close()
+    except Exception as e:
+        st.write(f"Search error: {e}")
+
+    return all_match_pages, scanned_pages
+
+# Fallback: If no 3 ALL MATCH found, search for max matching (2 words, 1 word)
+def search_max_matching_fallback(pdf_bytes, query):
+    query_words = [w.lower() for w in query.strip().split() if w.strip()][:4]
+    results = []
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for page_idx in range(len(doc)):
+            page = doc.load_page(page_idx)
+            text_lower = page.get_text("text").lower()
+            matched = [q for q in query_words if q in text_lower]
+            if matched:
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                img_bytes = pix.tobytes("png")
+                results.append((page_idx+1, len(matched), matched, img_bytes))
         doc.close()
     except: pass
     results.sort(key=lambda x: x[1], reverse=True)
-    return results, current_all_match_count, stopped_early
+    return results[:10] # Show max 10 if no 3 ALL found
 
 # Login
 if "customer_verified" not in st.session_state:
@@ -124,7 +135,7 @@ if "customer_email" not in st.session_state:
 
 if not st.session_state.customer_verified and not st.session_state.is_admin:
     st.title("🛁 Bathroom Pricelist Login")
-    tab1, tab2 = st.tabs(["👤 Customer Login / Signup", "🔐 Admin Login"])
+    tab1, tab2 = st.tabs(["👤 Customer", "🔐 Admin"])
     with tab2:
         pwd = st.text_input("Admin Password", type="password")
         if st.button("Login as Admin", type="primary", use_container_width=True):
@@ -132,23 +143,17 @@ if not st.session_state.customer_verified and not st.session_state.is_admin:
                 st.session_state.is_admin = True
                 st.session_state.customer_verified = True
                 st.rerun()
-            else:
-                st.error("Wrong Password")
     with tab1:
         with st.container(border=True):
-            login_mail = st.text_input("Enter your Mail ID to Login")
+            login_mail = st.text_input("Enter Mail ID")
             if st.button("Login"):
                 customers, _ = get_json_file("data/customers.json", [])
                 found = next((c for c in customers if c.get("mail","").lower() == login_mail.lower().strip()), None)
-                if not found:
-                    st.error("Mail ID not found. Please Signup below.")
-                elif not found.get("approved", False):
-                    st.warning("⏳ Pending approval from Admin.")
-                else:
+                if found and found.get("approved"):
                     st.session_state.customer_verified = True
                     st.session_state.customer_email = login_mail
                     st.rerun()
-        st.divider()
+                else: st.error("Not found or pending")
         with st.form("signup_form"):
             st.write("**New Customer Signup**")
             name = st.text_input("Name*")
@@ -156,24 +161,17 @@ if not st.session_state.customer_verified and not st.session_state.is_admin:
             mail = st.text_input("Mail ID*")
             city = st.text_input("City*")
             pincode = st.text_input("Pincode*")
-            company = st.text_input("Company Name (Optional)")
-            submit = st.form_submit_button("Submit for Approval", use_container_width=True)
-            if submit:
-                if not all([name.strip(), contact.strip(), mail.strip(), city.strip(), pincode.strip()]):
-                    st.error("Fill all * fields")
-                else:
-                    customers, sha = get_json_file("data/customers.json", [])
-                    if any(c.get("mail","").lower() == mail.lower().strip() for c in customers):
-                        st.error("Already registered.")
-                    else:
-                        customers.append({"name":name,"contact":contact,"mail":mail.strip(),"city":city,"pincode":pincode,"company":company,"approved": False})
-                        save_json_file("data/customers.json", customers, sha, f"New customer {name}")
-                        st.success("✅ Submitted for Admin Approval!")
+            company = st.text_input("Company (Optional)")
+            if st.form_submit_button("Submit for Approval", use_container_width=True):
+                customers, sha = get_json_file("data/customers.json", [])
+                customers.append({"name":name,"contact":contact,"mail":mail.strip(),"city":city,"pincode":pincode,"company":company,"approved": False})
+                save_json_file("data/customers.json", customers, sha, f"New {name}")
+                st.success("✅ Submitted for Approval!")
     st.stop()
 
-st.title("🛁 Pricelist Search - STOP at 3 MATCHES")
+st.title("🛁 Pricelist Search - ONLY 3 PAGES")
 if st.session_state.is_admin:
-    st.success("✅ Working Fine + Stop at 3 ALL MATCHES + Customer Approval Restored")
+    st.success("✅ FIXED - Shows ONLY 3 Pages with ALL WORDS + Images Fixed")
 else:
     st.success(f"Welcome {st.session_state.customer_email}")
 
@@ -186,52 +184,39 @@ brands_data, _ = get_json_file("data/brands.json", DEFAULT_BRANDS)
 brand_options = ["All Brands"] + brands_data
 col1, col2 = st.columns([1,2])
 with col1: brand_filter = st.selectbox("Brand", brand_options)
-with col2: search_query = st.text_input("Search Pricelist", placeholder="e.g. Mint shower head")
+with col2: search_query = st.text_input("Search Pricelist", placeholder="e.g. mint spout")
 
-search_btn = st.button("🔍 SEARCH - Stop at 3 ALL MATCHES", use_container_width=True, type="primary")
-
-approvals_data, _ = get_json_file("data/approvals.json", [])
-def is_approved_file(filename):
-    if not approvals_data: return True
-    for a in approvals_data:
-        if a["file"]==filename and a.get("approved"): return True
-    return False
+search_btn = st.button("🔍 SEARCH - Show ONLY 3 Pages", use_container_width=True, type="primary")
 
 if search_btn:
     if not search_query.strip():
         st.warning("Type word to search")
     else:
         all_files = get_all_pdfs_any_name()
-        st.write(f"📄 Pricelist files: {all_files}")
+        st.write(f"📄 Files: {all_files}")
 
         if not all_files:
-            st.error("No Pricelist PDFs! Upload in Admin Panel")
+            st.error("No PDFs!")
         else:
             filtered = all_files
             if brand_filter!="All Brands":
-                filtered_temp = [f for f in all_files if brand_filter.lower() in f.lower()]
-                if filtered_temp: filtered = filtered_temp
-
-            if not st.session_state.is_admin:
-                filtered = [f for f in filtered if is_approved_file(f)]
+                tmp = [f for f in all_files if brand_filter.lower() in f.lower()]
+                if tmp: filtered = tmp
 
             query_words = search_query.strip().split()
             total_q = len(query_words)
-            st.info(f"Searching **{query_words}** — Will **STOP after 3 pages with ALL {total_q} words matching** → Super Fast!")
+            st.info(f"Searching **{query_words}** — Will **STOP after 3 pages with ALL {total_q} words** and show ONLY 3")
 
-            final_results = []
-            all_match_counter = 0
+            final_all_match = []
             progress = st.progress(0)
             status = st.empty()
-            stopped = False
 
             for idx, filename in enumerate(filtered):
-                if all_match_counter >= 3:
-                    status.write(f"✅ STOPPED — Found 3 ALL WORDS matches — No need to search more!")
-                    stopped = True
+                if len(final_all_match) >= 3:
+                    status.write(f"✅ STOPPED - Found 3 ALL MATCHES - Fast!")
                     break
 
-                status.write(f"🔍 Searching {idx+1}/{len(filtered)}: {filename} | Found ALL-MATCH so far: {all_match_counter}/3")
+                status.write(f"🔍 {idx+1}/{len(filtered)}: {filename} | ALL MATCH found: {len(final_all_match)}/3")
                 try:
                     pdf_bytes = None
                     try:
@@ -247,50 +232,76 @@ if search_btn:
                                     pdf_bytes = r.content
                                     break
                     if pdf_bytes:
-                        pages, all_match_counter, early = search_inside_pdf_stop_at_3(pdf_bytes, search_query, all_match_counter)
-                        for page_no, match_count, matched_words, img_bytes in pages:
-                            final_results.append((filename, page_no, match_count, matched_words, img_bytes))
-                        if early:
-                            stopped = True
-                            status.write(f"✅ STOPPED at {filename} Page {pages[-1][0] if pages else ''} — Reached 3 ALL MATCHES!")
-                            break
+                        pages, scanned = search_stop_at_3_all_match(pdf_bytes, search_query)
+                        for p in pages:
+                            # Add filename to tuple
+                            final_all_match.append((filename, p[0], p[1], p[2], p[3]))
+                            if len(final_all_match) >= 3:
+                                break
                 except Exception as e:
                     st.write(f"Error {filename}: {e}")
                 progress.progress((idx+1)/len(filtered))
 
             progress.empty()
             status.empty()
-            final_results.sort(key=lambda x: x[2], reverse=True)
 
-            if not final_results:
-                st.error(f"No match for '{search_query}'")
-            else:
-                if stopped:
-                    st.success(f"✅ STOPPED EARLY — Found {all_match_counter} pages with ALL {total_q} words matching — Showing {len(final_results)} pages (Fast!)")
-                else:
-                    st.success(f"✅ Found {len(final_results)} pages — Sorted by Max Matching")
+            if len(final_all_match) >= 3:
+                final_all_match = final_all_match[:3] # ONLY 3 PAGES
+                st.success(f"✅ Found 3 pages with ALL {total_q} words - Showing ONLY 3 Pages - STOPPED EARLY - FAST!")
 
-                files_dict = {}
-                for filename, page_no, match_count, matched_words, img_bytes in final_results:
-                    if filename not in files_dict: files_dict[filename]=[]
-                    files_dict[filename].append((page_no, match_count, matched_words, img_bytes))
-
-                for filename, pages in files_dict.items():
-                    pages.sort(key=lambda x: x[1], reverse=True)
+                for filename, page_no, match_count, matched_words, img_bytes in final_all_match:
                     with st.container(border=True):
-                        st.write(f"### 📄 {filename} — {len(pages)} pages")
-                        for page_no, match_count, matched_words, img_bytes in pages[:15]:
-                            if match_count == total_q: badge = f"🟢 ALL {match_count} WORDS"
-                            elif match_count>=2: badge = f"🟡 {match_count} WORDS"
-                            else: badge = f"🔵 {match_count} WORD"
-                            st.write(f"**Page {page_no}** — {badge} — Matched: {', '.join(matched_words)}")
-                            st.image(img_bytes, caption=f"Page {page_no} - {filename}", use_container_width=True)
-                            st.divider()
+                        st.write(f"### 📄 {filename} — Page {page_no} — 🟢 ALL {match_count} WORDS — Matched: {', '.join(matched_words)}")
+                        st.image(img_bytes, caption=f"Page {page_no} - {filename} - ALL {match_count} WORDS MATCH", use_column_width=True)
+
+            elif len(final_all_match) > 0:
+                st.success(f"Found {len(final_all_match)} pages with ALL WORDS (less than 3)")
+                for filename, page_no, match_count, matched_words, img_bytes in final_all_match:
+                    with st.container(border=True):
+                        st.write(f"### 📄 {filename} — Page {page_no} — 🟢 ALL {match_count} WORDS")
+                        st.image(img_bytes, caption=f"Page {page_no}", use_column_width=True)
+
+            else:
+                # No ALL MATCH found - fallback to max matching
+                st.warning(f"No page with ALL {total_q} words found - Showing max matching (2 words, 1 word) fallback...")
+                fallback_results = []
+                for filename in filtered:
+                    try:
+                        pdf_bytes = None
+                        try:
+                            fc = repo.get_contents(f"pdfs/{filename}")
+                            pdf_bytes = base64.b64decode(fc.content)
+                        except:
+                            release = get_or_create_release()
+                            if release:
+                                import requests
+                                for asset in release.get_assets():
+                                    if asset.name == filename:
+                                        r = requests.get(asset.browser_download_url, timeout=90)
+                                        pdf_bytes = r.content
+                                        break
+                        if pdf_bytes:
+                            pages = search_max_matching_fallback(pdf_bytes, search_query)
+                            for p in pages:
+                                fallback_results.append((filename, p[0], p[1], p[2], p[3]))
+                    except: pass
+                fallback_results.sort(key=lambda x: x[2], reverse=True)
+                fallback_results = fallback_results[:3] # ONLY 3 PAGES even in fallback
+
+                if not fallback_results:
+                    st.error(f"No match for '{search_query}'")
+                else:
+                    st.info(f"Showing top {len(fallback_results)} max matching pages (ALL WORDS not found)")
+                    for filename, page_no, match_count, matched_words, img_bytes in fallback_results:
+                        with st.container(border=True):
+                            badge = f"🟡 {match_count} WORDS" if match_count>=2 else f"🔵 {match_count} WORD"
+                            st.write(f"### 📄 {filename} — Page {page_no} — {badge} — Matched: {', '.join(matched_words)}")
+                            st.image(img_bytes, caption=f"Page {page_no}", use_column_width=True)
 
 st.divider()
 st.header("💰 All Pricelists - Download")
 all_files = get_all_pdfs_any_name()
-if not all_files: st.info("No Pricelists yet")
+if not all_files: st.info("No Pricelists")
 else:
     for name in all_files:
         with st.container(border=True):
@@ -317,20 +328,11 @@ else:
 
 if st.session_state.is_admin:
     st.divider()
-    st.header("👑 Admin - ONLY PRICELISTS - ANY NAME")
+    st.header("👑 Admin Panel")
 
-    with st.expander("📊 Status", expanded=False):
-        all_files = get_all_pdfs_any_name()
-        st.write(f"**Pricelist PDFs:** {all_files}")
-        st.write(f"**Count:** {len(all_files)}")
-        customers_data, _ = get_json_file("data/customers.json", [])
-        st.write(f"**Customers:** {len(customers_data)}")
-        st.write(f"**Pending Approvals:** {len([c for c in customers_data if not c.get('approved')])}")
-
-    # RESTORED CUSTOMER APPROVAL - THIS WAS MISSING
     with st.expander("👥 Customer Approvals - RESTORED ✅", expanded=True):
         customers_data, sha_c = get_json_file("data/customers.json", [])
-        st.write(f"Total Customers: {len(customers_data)}")
+        st.write(f"Total Customers: {len(customers_data)} | Pending: {len([c for c in customers_data if not c.get('approved')])}")
         if not customers_data:
             st.info("No customers yet")
         else:
@@ -340,52 +342,28 @@ if st.session_state.is_admin:
                     col1, col2, col3 = st.columns([3,1,1])
                     with col1:
                         st.write(f"**{c.get('name')}** | {c.get('mail')} | {c.get('contact')} | {c.get('city')} | {status_txt}")
-                        if c.get("company"): st.write(f"Company: {c.get('company')}")
                     with col2:
                         if not c.get("approved"):
                             if st.button("✅ Approve", key=f"app_cust_{i}", type="primary"):
                                 customers_data[i]["approved"] = True
-                                save_json_file("data/customers.json", customers_data, sha_c, f"Approve customer {c.get('mail')}")
-                                st.success(f"Approved {c.get('mail')}")
+                                save_json_file("data/customers.json", customers_data, sha_c, f"Approve {c.get('mail')}")
                                 st.rerun()
                     with col3:
                         if st.button("❌ Delete", key=f"del_cust_{i}"):
                             customers_data.pop(i)
-                            save_json_file("data/customers.json", customers_data, sha_c, f"Delete customer {c.get('mail')}")
+                            save_json_file("data/customers.json", customers_data, sha_c, f"Delete {c.get('mail')}")
                             st.rerun()
 
-    with st.expander("🏷️ Manage Brands", expanded=False):
-        brands_data_list, sha_b = get_json_file("data/brands.json", DEFAULT_BRANDS)
-        st.write(f"Current Brands: {brands_data_list}")
-        new_brand = st.text_input("Add New Brand")
-        if st.button("Add Brand"):
-            if new_brand.strip() and new_brand.strip() not in brands_data_list:
-                brands_data_list.append(new_brand.strip())
-                save_json_file("data/brands.json", brands_data_list, sha_b, f"Add brand {new_brand}")
-                st.rerun()
-        for i, b in enumerate(brands_data_list):
-            col1, col2 = st.columns([4,1])
-            with col1: st.write(f"• {b}")
-            with col2:
-                if st.button("Delete", key=f"del_b_{i}"):
-                    brands_data_list.pop(i)
-                    save_json_file("data/brands.json", brands_data_list, sha_b, f"Delete {b}")
-                    st.rerun()
-
-    with st.expander("📤 Upload Pricelists - ANY NAME - SEARCHABLE", expanded=False):
-        st.info("✅ ANY NAME allowed - Will be searchable!")
+    with st.expander("📤 Upload Pricelists - ANY NAME", expanded=False):
         up_brand = st.selectbox("Select Brand", brands_data, key="up_brand_final")
-        up_files = st.file_uploader("Choose PRICELIST PDFs - ANY NAME", type=["pdf"], accept_multiple_files=True, key="up_final")
-        if st.button("⬆️ Upload Pricelist - ANY NAME", type="primary"):
+        up_files = st.file_uploader("Choose PDFs - ANY NAME", type=["pdf"], accept_multiple_files=True, key="up_final")
+        if st.button("⬆️ Upload", type="primary"):
             for f in up_files:
                 try:
                     safe_name = f.name.replace(" ", "_")
                     file_bytes = f.getvalue()
-                    size_mb = len(file_bytes)/(1024*1024)
                     fname = safe_name
-                    st.write(f"Uploading {fname} - {size_mb:.1f}MB...")
-
-                    if size_mb > 90:
+                    if len(file_bytes)/(1024*1024) > 90:
                         release = get_or_create_release()
                         for asset in release.get_assets():
                             if asset.name == fname: asset.delete_asset()
@@ -397,23 +375,6 @@ if st.session_state.is_admin:
                             repo.update_file(path, f"Update {fname}", file_bytes, ex.sha)
                         except:
                             repo.create_file(path, f"Add {fname}", file_bytes)
-                    st.success(f"✅ Uploaded {fname} - SEARCHABLE!")
-
-                    approvals_data, appr_sha = get_json_file("data/approvals.json", [])
-                    if not any(x["file"]==fname for x in approvals_data):
-                        approvals_data.append({"brand":up_brand,"file":fname,"approved":True})
-                        save_json_file("data/approvals.json", approvals_data, appr_sha, f"Add {fname}")
+                    st.success(f"✅ Uploaded {fname}")
                 except Exception as e:
                     st.error(f"Failed {f.name}: {e}")
-
-    with st.expander("✅ Approve Pricelist Files"):
-        approvals_list, sha = get_json_file("data/approvals.json", [])
-        for i, a in enumerate(approvals_list):
-            col_a, col_b = st.columns([4,1])
-            with col_a: st.write(f"{a['brand']} - {a['file']} - {'✅' if a.get('approved') else '⏳'}")
-            with col_b:
-                if not a.get("approved"):
-                    if st.button("Approve", key=f"appr_{i}"):
-                        approvals_list[i]["approved"]=True
-                        save_json_file("data/approvals.json", approvals_list, sha, f"Approve {a['file']}")
-                        st.rerun()

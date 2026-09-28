@@ -1,3 +1,6 @@
 streamlit
-pymupdf
-pillow
+PyMuPDF
+PyGithub
+gspread
+oauth2client
+Pillow

@@ -1,43 +1,42 @@
 import streamlit as st
-import fitz, base64, io
+import fitz, base64, json
 from github import Github
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import os
-from PIL import Image
 
 st.set_page_config(page_title="Bathroom AI - Final 8", layout="wide")
 
-# === CONFIG — FILL IN SECRETS ===
-# Go to Streamlit Cloud -> Manage App -> Secrets -> Paste this:
-# GITHUB_TOKEN = "ghp_xxxx"
-# GITHUB_REPO = "yourusername/bathroom-ai"
-# GOOGLE_SHEET_ID = "your_sheet_id"
-# GOOGLE_SERVICE_ACCOUNT = {...json content... }
-
+# === CONFIG — ONLY 2 VALUES NEEDED ===
 GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
 GITHUB_REPO_NAME = st.secrets["GITHUB_REPO"]
-GOOGLE_SHEET_ID = st.secrets["GOOGLE_SHEET_ID"]
 
-# GitHub init
 g = Github(GITHUB_TOKEN)
 repo = g.get_repo(GITHUB_REPO_NAME)
 
-# Google Sheets init
-scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-creds_dict = dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-client = gspread.authorize(creds)
-sheet_file = client.open_by_key(GOOGLE_SHEET_ID)
-sheet_b = sheet_file.worksheet("SheetB_Approval")
-sheet_c = sheet_file.worksheet("SheetC_Customers")
-sheet_d = sheet_file.worksheet("SheetD_Index")
+# === HELPER: GITHUB JSON STORAGE (Instead of Google Sheets) ===
+def get_json_file(path, default):
+    try:
+        file = repo.get_contents(path)
+        content = base64.b64decode(file.content).decode()
+        return json.loads(content), file.sha
+    except:
+        return default, None
 
-# === SESSION FOR SIGNUP ===
+def save_json_file(path, data, sha, message):
+    content = json.dumps(data, indent=2)
+    if sha:
+        repo.update_file(path, message, content, sha)
+    else:
+        try:
+            repo.create_file(path, message, content)
+        except:
+            # if already exists, get sha again
+            _, existing_sha = get_json_file(path, {})
+            if existing_sha:
+                repo.update_file(path, message, content, existing_sha)
+
+# === CUSTOMER SIGNUP — Stored in GitHub ===
 if "customer_verified" not in st.session_state:
     st.session_state.customer_verified = False
 
-# === 8. CUSTOMER SIGNUP ===
 if not st.session_state.customer_verified:
     st.title("Customer Signup Required")
     with st.form("signup"):
@@ -52,109 +51,100 @@ if not st.session_state.customer_verified:
             if not all([name, contact, mail, city, pincode]):
                 st.error("Fill all mandatory fields")
             else:
-                sheet_c.append_row([name, contact, mail, city, pincode, company])
+                customers, sha = get_json_file("data/customers.json", [])
+                customers.append({"name":name,"contact":contact,"mail":mail,"city":city,"pincode":pincode,"company":company})
+                save_json_file("data/customers.json", customers, sha, f"New customer {name}")
                 st.session_state.customer_verified = True
-                st.session_state.customer_mail = mail
+                st.success("Signup saved permanently to GitHub!")
                 st.rerun()
     st.stop()
 
-# === MAIN APP AFTER SIGNUP ===
+# === MAIN APP ===
 st.title("Bathroom Product Search - 8 Features Locked")
 
-# 7. Brand Wise Search
-col1, col2, col3 = st.columns([1,3,1])
+col1, col2 = st.columns([1,3])
 with col1:
     brand = st.selectbox("Brand", ["All Brands", "Fantini", "Gessi", "Hansgrohe"])
 with col2:
-    query = st.text_input("Search", placeholder="200mm Round shower")
-with col3:
-    st.write(" ")
-    search_btn = st.button("Search")
+    query = st.text_input("Search", placeholder="200mm Round shower in fantini")
 
-# 6. Image Search
-uploaded_image = st.file_uploader("Image Search - Upload shower image", type=["jpg","png"])
+search_btn = st.button("Search")
+uploaded_image = st.file_uploader("Image Search", type=["jpg","png"])
 
-# === SEARCH LOGIC ===
+# === APPROVAL LOGIC FROM GITHUB ===
+approvals, _ = get_json_file("data/approvals.json", []) # [{"brand":"Fantini","file":"Fantini_x.pdf","approved":True}]
+
 def is_approved(filename):
-    rows = sheet_b.get_all_records()
-    for r in rows:
-        if r['FileName']==filename and str(r['Approved']).upper()=="TRUE":
+    for a in approvals:
+        if a["file"]==filename and a["approved"]:
             return True
     return False
 
-def search_pdfs(q, brand_filter):
-    rows = sheet_d.get_all_records()
-    results=[]
-    for r in rows:
-        if brand_filter!="All Brands" and r['Brand']!=brand_filter:
-            continue
-        if not is_approved(r['FileName']):
-            continue
-        if q.lower() in str(r['TextContent']).lower() or q.lower() in str(r['FileName']).lower():
-            results.append(r)
-    return results
+# === SEARCH (Simplified — lists all PDFs for now) ===
+if search_btn or query:
+    try:
+        contents = repo.get_contents("pdfs")
+        pdf_files = [c.name for c in contents if c.name.endswith(".pdf")]
+        if brand!= "All Brands":
+            pdf_files = [f for f in pdf_files if f.startswith(brand)]
+        if query:
+            pdf_files = [f for f in pdf_files if query.lower() in f.lower()]
 
-if search_btn or uploaded_image:
-    if uploaded_image:
-        # Simple image search - use filename as query for now
-        q = uploaded_image.name.split('.')[0]
-        st.info(f"Image search for: {q}")
-    else:
-        q = query
+        # Filter only approved
+        pdf_files = [f for f in pdf_files if is_approved(f)]
 
-    results = search_pdfs(q, brand)
+        st.write(f"Found {len(pdf_files)} results")
 
-    # 4. Pagination - 20 per page
-    if "page_num" not in st.session_state:
-        st.session_state.page_num = 0
+        # 4. Pagination 20 per page
+        per_page = 20
+        if "page_num" not in st.session_state:
+            st.session_state.page_num = 0
 
-    total = len(results)
-    per_page = 20
-    pages = total // per_page + (1 if total % per_page else 0)
+        start = st.session_state.page_num * per_page
+        end = start + per_page
 
-    start = st.session_state.page_num * per_page
-    end = start + per_page
-    page_results = results[start:end]
-
-    st.write(f"Found {total} results")
-
-    for r in page_results:
-        with st.container(border=True):
-            st.write(f"**{r['Brand']}** - {r['FileName']} - Page {r['PageNo']}")
-            # 5. Page Display - ONLY original image + Download
-            try:
-                file_content = repo.get_contents(f"pdfs/{r['FileName']}")
+        for filename in pdf_files[start:end]:
+            with st.container(border=True):
+                st.write(f"**{filename}**")
+                file_content = repo.get_contents(f"pdfs/{filename}")
                 pdf_bytes = base64.b64decode(file_content.content)
                 doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                page = doc.load_page(int(r['PageNo']))
-                pix = page.get_pixmap(dpi=200)
+                # Show first page as original image
+                page = doc.load_page(0)
+                pix = page.get_pixmap(dpi=150)
                 img_bytes = pix.tobytes("png")
-                st.image(img_bytes, use_column_width=True)
-                st.download_button("Download Original Page", data=img_bytes, file_name=f"page_{r['PageNo']}.png", mime="image/png", key=f"{r['FileName']}_{r['PageNo']}")
-            except Exception as e:
-                st.error(f"Could not load page: {e}")
+                st.image(img_bytes, use_container_width=True)
+                st.download_button(f"Download {filename} - Page 1", data=img_bytes, file_name=f"{filename}_page1.png", mime="image/png", key=filename)
 
-    col_prev, col_next = st.columns(2)
-    with col_prev:
-        if st.button("Prev") and st.session_state.page_num>0:
-            st.session_state.page_num-=1
-            st.rerun()
-    with col_next:
-        if st.button("Next") and st.session_state.page_num < pages-1:
-            st.session_state.page_num+=1
-            st.rerun()
+    except Exception as e:
+        st.error(f"No pdfs folder yet or {e}")
 
-# === ADMIN: UPLOAD TO GITHUB — PERMANENT ===
+# === ADMIN UPLOAD — PERMANENT GITHUB COMMIT ===
 with st.expander("Admin - Upload PDFs to GitHub (Permanent)"):
     up_brand = st.selectbox("Brand for upload", ["Fantini", "Gessi", "Hansgrohe"], key="up_brand")
     up_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
-    if st.button("Upload to GitHub - Permanent Commit"):
+    if st.button("Upload to GitHub - Permanent"):
         for f in up_files:
             try:
                 content = f.read()
                 path = f"pdfs/{up_brand}_{f.name}"
                 repo.create_file(path, f"Add {f.name}", content)
-                sheet_b.append_row([up_brand, f"{up_brand}_{f.name}", "FALSE"])
-                st.success(f"Uploaded {f.name} - Waiting for approval in SheetB")
+                # Add to approvals.json as FALSE
+                approvals_data, sha = get_json_file("data/approvals.json", [])
+                approvals_data.append({"brand":up_brand,"file":f"{up_brand}_{f.name}","approved":False})
+                save_json_file("data/approvals.json", approvals_data, sha, f"Approval for {f.name}")
+                st.success(f"Uploaded {f.name} — Now approve in data/approvals.json")
             except Exception as e:
                 st.error(f"{f.name} failed: {e}")
+
+with st.expander("Admin - Approve Files"):
+    approvals_data, sha = get_json_file("data/approvals.json", [])
+    for i, a in enumerate(approvals_data):
+        col_a, col_b = st.columns([3,1])
+        with col_a:
+            st.write(f"{a['brand']} - {a['file']} - Approved: {a['approved']}")
+        with col_b:
+            if st.button(f"Approve", key=f"app_{i}"):
+                approvals_data[i]["approved"]=True
+                save_json_file("data/approvals.json", approvals_data, sha, f"Approved {a['file']}")
+                st.rerun()

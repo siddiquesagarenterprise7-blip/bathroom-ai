@@ -1,86 +1,80 @@
-import os, io, json, base64, re
-from flask import Flask, request, render_template_string, jsonify, session, redirect
-import fitz # PyMuPDF
+import streamlit as st
+import fitz, base64, io
 from github import Github
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import os
+from PIL import Image
 
-app = Flask(__name__)
-app.secret_key = "FINAL_8_FEATURES_LOCKED"
+st.set_page_config(page_title="Bathroom AI - Final 8", layout="wide")
 
-# === CONFIG — FILL YOUR KEYS ===
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO = "yourusername/yourpdfrepo"
-GITHUB_FOLDER = "pdfs"
-GOOGLE_SHEET_ID = "YOUR_GOOGLE_SHEET_ID"
-SERVICE_ACCOUNT_JSON = "service_account.json" # upload to server
+# === CONFIG — FILL IN SECRETS ===
+# Go to Streamlit Cloud -> Manage App -> Secrets -> Paste this:
+# GITHUB_TOKEN = "ghp_xxxx"
+# GITHUB_REPO = "yourusername/bathroom-ai"
+# GOOGLE_SHEET_ID = "your_sheet_id"
+# GOOGLE_SERVICE_ACCOUNT = {...json content... }
 
-# Google Sheets Setup
+GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
+GITHUB_REPO_NAME = st.secrets["GITHUB_REPO"]
+GOOGLE_SHEET_ID = st.secrets["GOOGLE_SHEET_ID"]
+
+# GitHub init
+g = Github(GITHUB_TOKEN)
+repo = g.get_repo(GITHUB_REPO_NAME)
+
+# Google Sheets init
 scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name(SERVICE_ACCOUNT_JSON, scope)
+creds_dict = dict(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 sheet_file = client.open_by_key(GOOGLE_SHEET_ID)
-sheet_b = sheet_file.worksheet("SheetB_Approval") # Brand | FileName | Approved TRUE/FALSE
-sheet_c = sheet_file.worksheet("SheetC_Customers") # Name | Contact | Mail | City | Pincode | Company | Date
-sheet_index = sheet_file.worksheet("SheetD_Index") # Brand | FileName | PageNo | TextContent
+sheet_b = sheet_file.worksheet("SheetB_Approval")
+sheet_c = sheet_file.worksheet("SheetC_Customers")
+sheet_d = sheet_file.worksheet("SheetD_Index")
 
-g = Github(GITHUB_TOKEN)
-repo = g.get_repo(GITHUB_REPO)
+# === SESSION FOR SIGNUP ===
+if "customer_verified" not in st.session_state:
+    st.session_state.customer_verified = False
 
-# === 1. PERMANENT PDFS — GITHUB COMMIT ===
-def upload_to_github(file_storage, brand):
-    filename = f"{brand}_{file_storage.filename}"
-    content = file_storage.read()
-    path = f"{GITHUB_FOLDER}/{filename}"
-    try:
-        # Create commit — permanent, no delete on reboot
-        repo.create_file(path, f"Add {filename}", content)
-        # Add to Sheet B for approval — Block search until approved
-        sheet_b.append_row([brand, filename, "FALSE"])
-        return True
-    except:
-        return False
+# === 8. CUSTOMER SIGNUP ===
+if not st.session_state.customer_verified:
+    st.title("Customer Signup Required")
+    with st.form("signup"):
+        name = st.text_input("Name*")
+        contact = st.text_input("Contact No*")
+        mail = st.text_input("Mail ID*")
+        city = st.text_input("City*")
+        pincode = st.text_input("Pincode*")
+        company = st.text_input("Company Name (Optional)")
+        submit = st.form_submit_button("Submit & Continue")
+        if submit:
+            if not all([name, contact, mail, city, pincode]):
+                st.error("Fill all mandatory fields")
+            else:
+                sheet_c.append_row([name, contact, mail, city, pincode, company])
+                st.session_state.customer_verified = True
+                st.session_state.customer_mail = mail
+                st.rerun()
+    st.stop()
 
-def list_approved_pdfs(brand_filter="All Brands"):
-    all_rows = sheet_b.get_all_records()
-    approved = [r for r in all_rows if str(r['Approved']).upper()=="TRUE"]
-    if brand_filter!= "All Brands":
-        approved = [r for r in approved if r['Brand']==brand_filter]
-    return approved
+# === MAIN APP AFTER SIGNUP ===
+st.title("Bathroom Product Search - 8 Features Locked")
 
-# === 8. CUSTOMER SIGNUP — MANDATORY ===
-@app.route("/signup", methods=["POST"])
-def signup():
-    data = request.json
-    # Validation — Company not mandatory
-    if not all([data.get('name'), data.get('contact'), data.get('mail'), data.get('city'), data.get('pincode')]):
-        return jsonify({"error":"Fill mandatory fields"}), 400
-    sheet_c.append_row([data['name'], data['contact'], data['mail'], data['city'], data['pincode'], data.get('company',''), ""])
-    session['customer_verified'] = True
-    session['customer_mail'] = data['mail']
-    return jsonify({"success":True})
+# 7. Brand Wise Search
+col1, col2, col3 = st.columns([1,3,1])
+with col1:
+    brand = st.selectbox("Brand", ["All Brands", "Fantini", "Gessi", "Hansgrohe"])
+with col2:
+    query = st.text_input("Search", placeholder="200mm Round shower")
+with col3:
+    st.write(" ")
+    search_btn = st.button("Search")
 
-# === SEARCH CORE — 3,6,7 ===
-def search_pdfs(query, brand_filter, page=1):
-    query = query.lower()
-    rows = sheet_index.get_all_records() # Pre-indexed text of all PDF pages
-    results = []
-    for r in rows:
-        # 7. Brand Wise Search
-        if brand_filter!= "All Brands" and r['Brand']!= brand_filter:
-            continue
-        # 2. Approval Check
-        if not is_approved(r['FileName']):
-            continue
-        # 3. Text Search — `200mm Round shower in fantini` → finds & works
-        if query in r['TextContent'].lower() or query in r['FileName'].lower():
-            results.append(r)
-    # 4. Pagination — 20 per page
-    per_page = 20
-    start = (page-1)*per_page
-    end = start + per_page
-    return results[start:end], len(results)
+# 6. Image Search
+uploaded_image = st.file_uploader("Image Search - Upload shower image", type=["jpg","png"])
 
+# === SEARCH LOGIC ===
 def is_approved(filename):
     rows = sheet_b.get_all_records()
     for r in rows:
@@ -88,144 +82,79 @@ def is_approved(filename):
             return True
     return False
 
-# === 5. PAGE DISPLAY — ONLY ORIGINAL IMAGE + DOWNLOAD ===
-@app.route("/page_view")
-def page_view():
-    brand = request.args.get("brand")
-    filename = request.args.get("file")
-    pageno = int(request.args.get("pageno", 0))
-    # Get file from GitHub
-    file_content = repo.get_contents(f"{GITHUB_FOLDER}/{filename}")
-    pdf_bytes = base64.b64decode(file_content.content)
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page = doc.load_page(pageno)
-    pix = page.get_pixmap(dpi=200)
-    img_bytes = pix.tobytes("png")
-    # Return as image page with download button — UI handles it
-    return f'''
-    <div style="text-align:center">
-        <img src="data:image/png;base64,{base64.b64encode(img_bytes).decode()}" style="max-width:100%;box-shadow:0 0 10px #ccc"/>
-        <br><br>
-        <a href="/download?file={filename}&pageno={pageno}" download><button style="padding:10px 20px;background:#000;color:#fff">Download Page</button></a>
-    </div>
-    '''
+def search_pdfs(q, brand_filter):
+    rows = sheet_d.get_all_records()
+    results=[]
+    for r in rows:
+        if brand_filter!="All Brands" and r['Brand']!=brand_filter:
+            continue
+        if not is_approved(r['FileName']):
+            continue
+        if q.lower() in str(r['TextContent']).lower() or q.lower() in str(r['FileName']).lower():
+            results.append(r)
+    return results
 
-@app.route("/download")
-def download():
-    filename = request.args.get("file")
-    pageno = int(request.args.get("pageno"))
-    file_content = repo.get_contents(f"{GITHUB_FOLDER}/{filename}")
-    pdf_bytes = base64.b64decode(file_content.content)
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page = doc.load_page(pageno)
-    pix = page.get_pixmap(dpi=200)
-    return pix.tobytes("png"), 200, {'Content-Type':'image/png', 'Content-Disposition': f'attachment; filename=page_{pageno}.png'}
+if search_btn or uploaded_image:
+    if uploaded_image:
+        # Simple image search - use filename as query for now
+        q = uploaded_image.name.split('.')[0]
+        st.info(f"Image search for: {q}")
+    else:
+        q = query
 
-# === 6. IMAGE SEARCH ===
-@app.route("/image_search", methods=["POST"])
-def image_search():
-    # Simple CLIP / placeholder — finds similar product page by text from image filename
-    # You can plug MobileNet similarity here
-    file = request.files['image']
-    # For now — search by image name as query
-    results, total = search_pdfs(file.filename.split('.')[0], request.form.get('brand','All Brands'))
-    return jsonify(results)
+    results = search_pdfs(q, brand)
 
-# === MAIN UI ===
-HTML = """
-<!DOCTYPE html>
-<html>
-<head><title>PDF Search — Final 8 Features</title>
-<style>
-body{font-family:Arial;padding:20px}
-.search-box{display:flex;gap:10px;margin-bottom:20px}
-select, input{padding:10px;border:1px solid #000}
-#signup{border:1px solid #000;padding:20px;margin-bottom:20px}
-</style>
-</head>
-<body>
-<div id="signup">
-<h3>Customer Signup Required</h3>
-<input id="name" placeholder="Name*">
-<input id="contact" placeholder="Contact No*">
-<input id="mail" placeholder="Mail ID*">
-<input id="city" placeholder="City*">
-<input id="pincode" placeholder="Pincode*">
-<input id="company" placeholder="Company Name (Optional)">
-<button onclick="doSignup()">Submit & Continue</button>
-</div>
+    # 4. Pagination - 20 per page
+    if "page_num" not in st.session_state:
+        st.session_state.page_num = 0
 
-<div id="main" style="display:none">
-<div class="search-box">
-<select id="brand">
-<option>All Brands</option><option>Fantini</option><option>Gessi</option><option>Hansgrohe</option>
-</select>
-<input id="query" placeholder="Search 200mm Round shower..." style="flex:1">
-<button onclick="doSearch(1)">Search</button>
-<input type="file" id="imgSearch"><button onclick="doImageSearch()">Image Search</button>
-</div>
-<div id="results"></div>
-<div id="pagination"></div>
-</div>
+    total = len(results)
+    per_page = 20
+    pages = total // per_page + (1 if total % per_page else 0)
 
-<script>
-function doSignup(){
- fetch('/signup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-  name:document.getElementById('name').value,
-  contact:document.getElementById('contact').value,
-  mail:document.getElementById('mail').value,
-  city:document.getElementById('city').value,
-  pincode:document.getElementById('pincode').value,
-  company:document.getElementById('company').value
- })}).then(r=>r.json()).then(d=>{
-  if(d.success){document.getElementById('signup').style.display='none';document.getElementById('main').style.display='block';}
-  else alert(d.error)
- })
-}
-let curPage=1;
-function doSearch(page){
- curPage=page;
- fetch(`/search?q=${document.getElementById('query').value}&brand=${document.getElementById('brand').value}&page=${page}`)
-.then(r=>r.json()).then(d=>{
-  let html='';
-  d.results.forEach(r=>{
-   html+=`<div style="border:1px solid #eee;padding:10px;margin:5px"><b>${r.Brand}</b> - ${r.FileName} - Page ${r.PageNo}
-   <a href="/page_view?brand=${r.Brand}&file=${r.FileName}&pageno=${r.PageNo}" target="_blank">View Original Page</a></div>`;
-  });
-  document.getElementById('results').innerHTML=html;
-  // Pagination 20 per page
-  let totalPages=Math.ceil(d.total/20);
-  let pagHtml='';
-  if(curPage>1) pagHtml+=`<button onclick="doSearch(${curPage-1})">Prev</button>`;
-  for(let i=1;i<=totalPages;i++) pagHtml+=`<button onclick="doSearch(${i})" ${i==curPage?'style="background:#000;color:#fff"':''}>${i}</button>`;
-  if(curPage<totalPages) pagHtml+=`<button onclick="doSearch(${curPage+1})">Next</button>`;
-  document.getElementById('pagination').innerHTML=pagHtml;
- })
-}
-function doImageSearch(){
- let fd=new FormData();
- fd.append('image', document.getElementById('imgSearch').files[0]);
- fd.append('brand', document.getElementById('brand').value);
- fetch('/image_search',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{console.log(d); alert('Image search found '+d.length+' results — displayed')})
-}
-</script>
-</body>
-</html>
-"""
+    start = st.session_state.page_num * per_page
+    end = start + per_page
+    page_results = results[start:end]
 
-@app.route("/")
-def home():
-    if not session.get('customer_verified'):
-        return render_template_string(HTML)
-    return render_template_string(HTML)
+    st.write(f"Found {total} results")
 
-@app.route("/search")
-def search_api():
-    q = request.args.get("q","")
-    brand = request.args.get("brand","All Brands")
-    page = int(request.args.get("page",1))
-    results, total = search_pdfs(q, brand, page)
-    return jsonify({"results":results, "total":total})
+    for r in page_results:
+        with st.container(border=True):
+            st.write(f"**{r['Brand']}** - {r['FileName']} - Page {r['PageNo']}")
+            # 5. Page Display - ONLY original image + Download
+            try:
+                file_content = repo.get_contents(f"pdfs/{r['FileName']}")
+                pdf_bytes = base64.b64decode(file_content.content)
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                page = doc.load_page(int(r['PageNo']))
+                pix = page.get_pixmap(dpi=200)
+                img_bytes = pix.tobytes("png")
+                st.image(img_bytes, use_column_width=True)
+                st.download_button("Download Original Page", data=img_bytes, file_name=f"page_{r['PageNo']}.png", mime="image/png", key=f"{r['FileName']}_{r['PageNo']}")
+            except Exception as e:
+                st.error(f"Could not load page: {e}")
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    col_prev, col_next = st.columns(2)
+    with col_prev:
+        if st.button("Prev") and st.session_state.page_num>0:
+            st.session_state.page_num-=1
+            st.rerun()
+    with col_next:
+        if st.button("Next") and st.session_state.page_num < pages-1:
+            st.session_state.page_num+=1
+            st.rerun()
+
+# === ADMIN: UPLOAD TO GITHUB — PERMANENT ===
+with st.expander("Admin - Upload PDFs to GitHub (Permanent)"):
+    up_brand = st.selectbox("Brand for upload", ["Fantini", "Gessi", "Hansgrohe"], key="up_brand")
+    up_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
+    if st.button("Upload to GitHub - Permanent Commit"):
+        for f in up_files:
+            try:
+                content = f.read()
+                path = f"pdfs/{up_brand}_{f.name}"
+                repo.create_file(path, f"Add {f.name}", content)
+                sheet_b.append_row([up_brand, f"{up_brand}_{f.name}", "FALSE"])
+                st.success(f"Uploaded {f.name} - Waiting for approval in SheetB")
+            except Exception as e:
+                st.error(f"{f.name} failed: {e}")

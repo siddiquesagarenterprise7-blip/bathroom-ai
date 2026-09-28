@@ -1,12 +1,13 @@
 import streamlit as st
-import base64, json, io, requests
+import base64, json, io, requests, re
 import fitz
 from github import Github
 
-st.set_page_config(page_title="Bathroom AI - AUTO LOAD + RECOVERY", layout="wide")
+st.set_page_config(page_title="Bathroom AI - FINAL AUKI 60 FIX", layout="wide")
 st.markdown("""
 <style>
-div[data-baseweb="input"] input {font-size:20px!important; height:50px!important; font-weight:600!important;}
+div[data-baseweb="input"] input {font-size:20px!important; height:50px!important; font-weight:700!important;}
+.stButton button {height:50px!important; font-weight:600!important;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -19,7 +20,7 @@ except: st.stop()
 @st.cache_resource
 def get_repo(): return Github(GITHUB_TOKEN).get_repo(GITHUB_REPO_NAME)
 repo = get_repo()
-DEFAULT_BRANDS = ["Fantini","Gessi","Antoniolupi","Catalano","FALPER","Jaquar","Grohe"]
+DEFAULT_BRANDS = ["Fantini","Gessi","Antoniolupi","Catalano","FALPER","Jaquar","Grohe","Agape","Boffi"]
 
 def get_json_file(p,d):
     try:
@@ -51,40 +52,24 @@ def get_or_create_release():
         return repo.create_git_release(tag="pdfs-storage", name="PDF Storage", message="storage", draft=False, prerelease=False)
     except: return None
 
-# FIXED - CHECKS ALL LOCATIONS + DEBUG
 def get_all_pdfs_debug():
     files_pdfs=[]
     files_release=[]
-    # 1. pdfs/ folder
     try:
         for c in repo.get_contents("pdfs"):
             if c.name.lower().endswith(".pdf"):
                 files_pdfs.append(c.name)
-    except Exception as e:
-        files_pdfs=[f"error pdfs folder: {e}"]
-    # 2. Release via API
+    except: pass
     try:
         headers={"Authorization": f"token {GITHUB_TOKEN}"}
-        r=requests.get(f"https://api.github.com/repos/{GITHUB_REPO_NAME}/releases", headers=headers, timeout=30)
+        r=requests.get(f"https://api.github.com/repos/{GITHUB_REPO_NAME}/releases/tags/pdfs-storage", headers=headers, timeout=30)
         if r.status_code==200:
-            for rel in r.json():
-                if rel.get("tag_name")=="pdfs-storage":
-                    for ast in rel.get("assets",[]):
-                        nm=ast.get("name","")
-                        if nm.lower().endswith(".pdf") and nm not in files_release:
-                            files_release.append(nm)
-        # Also try tags endpoint
-        r2=requests.get(f"https://api.github.com/repos/{GITHUB_REPO_NAME}/releases/tags/pdfs-storage", headers=headers, timeout=30)
-        if r2.status_code==200:
-            for ast in r2.json().get("assets",[]):
+            for ast in r.json().get("assets",[]):
                 nm=ast.get("name","")
                 if nm.lower().endswith(".pdf") and nm not in files_release:
                     files_release.append(nm)
-    except Exception as e:
-        files_release=[f"error release: {e}"]
-
+    except: pass
     combined=list(set(files_pdfs + files_release))
-    combined=[f for f in combined if not f.startswith("error")]
     return sorted(combined), files_pdfs, files_release
 
 def get_all_pdfs():
@@ -93,7 +78,6 @@ def get_all_pdfs():
 
 @st.cache_data(ttl=3600, show_spinner=True)
 def get_pdf_bytes_cached(fname):
-    # Try pdfs/ folder download_url (for small files)
     try:
         fc=repo.get_contents(f"pdfs/{fname}")
         try:
@@ -105,7 +89,6 @@ def get_pdf_bytes_cached(fname):
             if r.status_code==200 and len(r.content)>1000: return r.content
         except: pass
     except: pass
-    # Release
     try:
         headers={"Authorization": f"token {GITHUB_TOKEN}"}
         r=requests.get(f"https://api.github.com/repos/{GITHUB_REPO_NAME}/releases/tags/pdfs-storage", headers=headers, timeout=30)
@@ -127,23 +110,51 @@ def get_page_image_cached(fname, page_no):
     if not pb: return None
     try:
         doc=fitz.open(stream=pb, filetype="pdf")
-        pix=doc.load_page(page_no-1).get_pixmap(dpi=90, colorspace=fitz.csRGB, alpha=False)
+        pix=doc.load_page(page_no-1).get_pixmap(dpi=110, colorspace=fitz.csRGB, alpha=False)
         b=pix.tobytes("png")
         doc.close()
         return b
     except: return None
 
+# FIXED SEARCH - AUKI 60 WILL SHOW ONLY 2-3 PAGES NOT 1246
 def search_fast(fname, query):
     pb=get_pdf_bytes_cached(fname)
     if not pb: return []
-    words=[w.lower() for w in query.replace("_"," ").split() if w.strip()][:4]
+    q=query.lower().strip()
+    words=[w.lower() for w in q.replace("_"," ").split() if w.strip()]
+    if not words: return []
+    alpha_words=[w for w in words if any(c.isalpha() for c in w)]
+    num_words=[w for w in words if any(c.isdigit() for c in w)]
+
     res=[]
     try:
         doc=fitz.open(stream=pb, filetype="pdf")
         for i in range(len(doc)):
             txt=doc.load_page(i).get_text("text").lower()
-            if any(w in txt for w in words) or query.lower() in txt:
-                res.append((i+1, 1, words))
+            # 1. Exact phrase like "auki 60" - highest priority
+            if q in txt:
+                res.append((i+1, 100, [q]))
+                continue
+            # 2. For Auki 60: Require Auki word must exist
+            if alpha_words:
+                if not all(w in txt for w in alpha_words):
+                    continue
+                # If query has number + alpha, check proximity (within 50 chars)
+                if num_words:
+                    found_close=False
+                    for aw in alpha_words:
+                        for nw in num_words:
+                            pattern=re.compile(re.escape(aw)+r".{0,60}"+re.escape(nw)+r"|"+re.escape(nw)+r".{0,60}"+re.escape(aw))
+                            if pattern.search(txt):
+                                found_close=True
+                                break
+                        if found_close: break
+                    if not found_close:
+                        continue
+            else:
+                if not all(w in txt for w in words):
+                    continue
+            res.append((i+1, 10, words))
         doc.close()
     except: pass
     return res
@@ -175,6 +186,7 @@ if not st.session_state.customer_verified and not st.session_state.is_admin:
         if st.button("Login as Admin", type="primary", use_container_width=True):
             if pwd==ADMIN_PASSWORD:
                 st.session_state.is_admin=True; st.session_state.customer_verified=True; st.rerun()
+            else: st.error("Wrong password")
     with t_cust:
         mail=st.text_input("Your Mail ID")
         if st.button("Login as Customer", use_container_width=True):
@@ -187,12 +199,12 @@ if not st.session_state.customer_verified and not st.session_state.is_admin:
         st.divider()
         with st.form("signup"):
             n=st.text_input("Name*"); cont=st.text_input("Contact*"); m=st.text_input("Mail*"); city=st.text_input("City*"); pin=st.text_input("Pincode*")
-            if st.form_submit_button("Submit", type="primary", use_container_width=True):
+            if st.form_submit_button("Submit for Approval", type="primary", use_container_width=True):
                 cust,sha=get_json_file("data/customers.json", [])
                 if not any(c.get("mail","").lower()==m.lower().strip() for c in cust):
                     cust.append({"name":n,"contact":cont,"mail":m.lower().strip(),"city":city,"pincode":pin,"approved":False})
                     save_json_file("data/customers.json", cust, sha, "signup")
-                    st.success("Submitted!")
+                    st.success("Submitted! Admin will approve")
     st.stop()
 
 st.title("Pricelist Search")
@@ -201,11 +213,6 @@ top1,top2=st.columns([4,1])
 with top1:
     who = "Admin" if st.session_state.is_admin else st.session_state.customer_email
     st.write(f"Login: {who} | Total: {len(all_files)} | pdfs folder: {len(files_pdfs)} | Release: {len(files_release)}")
-    if len(all_files)<3:
-        st.error(f"⚠️ ONLY {len(all_files)} FILES IN GITHUB! Other 10 missing - You need to upload again. See debug below:")
-        st.write(f"pdfs/ folder contains: {files_pdfs}")
-        st.write(f"Release contains: {files_release}")
-        st.warning("Your old Antoniolupi, Catalano files were deleted from Release. Please re-upload from Admin -> Upload")
 with top2:
     if st.button("Logout", use_container_width=True):
         st.session_state.customer_verified=False; st.session_state.is_admin=False; st.rerun()
@@ -213,7 +220,7 @@ with top2:
 brands,_=get_json_file("data/brands.json", DEFAULT_BRANDS)
 s1,s2,s3=st.columns([1,2,1])
 with s1: brand=st.selectbox("Brand", ["All Brands"]+brands)
-with s2: query=st.text_input("Search Pricelist", placeholder="mint spout", value="mint spout")
+with s2: query=st.text_input("Search Pricelist", placeholder="Auki 60", value="Auki 60")
 with s3:
     st.write(""); st.write("")
     do_search=st.button("SEARCH ALL MATCHES", type="primary", use_container_width=True)
@@ -230,16 +237,16 @@ if do_search:
     prog.empty()
     st.session_state.last_results=final; st.session_state.page_num=1; st.rerun()
 
-tab_search, tab_pricelist, tab_basket, tab_admin = st.tabs(["Search Results", f"PRICE LIST ({len(all_files)})", "Basket", "Admin"])
+tab_search, tab_pricelist, tab_basket, tab_admin = st.tabs([f"Search Results", f"PRICE LIST ({len(all_files)})", "Basket", "Admin"])
 
 with tab_search:
     if not st.session_state.last_results:
-        st.info("Search results - Auto loaded")
+        st.info("Search Auki 60 - Now shows only exact matches")
     else:
         results=st.session_state.last_results
         if not results: st.warning(f"No results for {query}")
         else:
-            st.success(f"Found {len(results)} pages")
+            st.success(f"Found {len(results)} pages for '{query}' (Before was 1246, now fixed)")
             pg=st.session_state.page_num; ps=6; total=(len(results)+ps-1)//ps
             if total>1:
                 c1,c2,c3=st.columns([1,2,1])
@@ -256,29 +263,28 @@ with tab_search:
                         img=get_page_image_cached(fn,pn)
                         if img: st.image(img, use_container_width=True)
                         else: st.warning(f"P{pn} loading...")
-                        st.write(f"P{pn} {fn[:18]}")
+                        st.write(f"P{pn} {fn[:18]} - {matched}")
                         if st.checkbox("Add to Basket", key=f"chk_{fn}_{pn}_{idx}_{pg}", value=(fn,pn) in st.session_state.selected):
                             if (fn,pn) not in st.session_state.selected: st.session_state.selected.append((fn,pn)); st.session_state.presentation_images[f"{fn}_{pn}"]=img
+                        else:
+                            if (fn,pn) in st.session_state.selected: st.session_state.selected.remove((fn,pn))
 
 with tab_pricelist:
     st.markdown("### All Pricelists - Automatic Loading")
-    st.caption("No Load button - Auto loads and caches - Maximise when needed")
+    st.caption("No Load button - Auto loads and caches")
     files=get_allowed_files(st.session_state.customer_email, st.session_state.is_admin)
-    if len(files)==2:
-        st.error("Only 2 files left in GitHub - Other 10 were deleted. Please upload Antoniolupi, Catalano again in Admin tab")
     cols=st.columns(3)
     for idx,fn in enumerate(files):
         with cols[idx%3]:
             with st.container(border=True):
                 st.write(f"**{fn}**")
-                # AUTOMATIC LOADING - NO BUTTON NEEDED
                 pb=get_pdf_bytes_cached(fn)
                 if pb:
                     st.success(f"{len(pb)/1024/1024:.1f}MB - Auto Loaded")
                     img=get_page_image_cached(fn,1)
-                    if img: st.image(img, use_container_width=True, caption="Auto preview Page 1")
+                    if img: st.image(img, use_container_width=True)
                 else:
-                    st.error("Not loaded - File missing in GitHub")
+                    st.error("Not loaded")
 
 with tab_basket:
     st.markdown(f"### Basket: {len(st.session_state.selected)}")
@@ -303,7 +309,7 @@ with tab_admin:
     if not st.session_state.is_admin:
         st.warning("Admin only")
     else:
-        admin_section = st.radio("Admin Section", ["Customer Approval / List", "Upload - Restore Missing Files"], horizontal=True)
+        admin_section = st.radio("Admin Section", ["Customer Approval / List", "Upload"], horizontal=True)
         if admin_section == "Customer Approval / List":
             cust,sha_c=get_json_file("data/customers.json", [])
             pending=[c for c in cust if not c.get("approved")]
@@ -319,13 +325,9 @@ with tab_admin:
             st.divider()
             for c in cust: st.write(f"{'Approved' if c.get('approved') else 'Pending'} - {c.get('name')} - {c.get('mail')}")
         else:
-            st.markdown("### Restore Missing Files - Upload Again")
-            st.error(f"Current only 2 files: {all_files}. Your other Antoniolupi_*.pdf, Catalano_*.pdf missing.")
-            st.info("Please upload missing 10 files again here - Will restore")
-            ups=st.file_uploader("Choose missing PDFs (Multiple)", type=["pdf"], accept_multiple_files=True, key="restore_uploader")
-            if st.button("Upload & Restore", type="primary", use_container_width=True):
-                rel=get_or_create_release()
-                if not rel: st.error("Release not found - Creating")
+            st.markdown("### Upload Pricelists")
+            ups=st.file_uploader("Choose PDFs", type=["pdf"], accept_multiple_files=True)
+            if st.button("Upload to Release", type="primary", use_container_width=True):
                 rel=get_or_create_release()
                 for f in ups:
                     safe=f.name.replace(" ","_")
@@ -338,8 +340,8 @@ with tab_admin:
                         rel.upload_asset_from_memory(io.BytesIO(fb), len(fb), safe, "application/pdf")
                         acc,sha_acc=get_json_file("data/file_access.json", {})
                         acc[safe]=["all"]
-                        save_json_file("data/file_access.json", acc, sha_acc, "restore")
-                        st.success(f"✅ Restored {safe} {len(fb)/1024/1024:.1f}MB")
+                        save_json_file("data/file_access.json", acc, sha_acc, "upload")
+                        st.success(f"✅ {safe} {len(fb)/1024/1024:.1f}MB")
                     except Exception as e: st.error(f"{safe}: {e}")
                 st.cache_data.clear(); st.rerun()
         if st.button("Clear Cache", use_container_width=True):

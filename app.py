@@ -4,7 +4,7 @@ import fitz
 from PIL import Image
 from github import Github
 
-st.set_page_config(page_title="Bathroom AI - FINAL 6 PER PAGE", layout="wide")
+st.set_page_config(page_title="Bathroom AI - FINAL FULL", layout="wide")
 
 try:
     GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
@@ -88,7 +88,6 @@ def get_pdf_bytes(fname):
         except: pass
     return None
 
-# SHOW ALL MATCHES - NOT 3
 def search_all_matching(pdf_bytes, query):
     words=[w.lower() for w in query.strip().split() if w.strip()][:4]
     total=len(words)
@@ -101,9 +100,9 @@ def search_all_matching(pdf_bytes, query):
             txt=page.get_text("text").lower()
             matched=[w for w in words if w in txt]
             if len(matched)==total:
-                pix=page.get_pixmap(dpi=110)
-                pil=Image.open(io.BytesIO(pix.tobytes("png")))
-                results.append((i+1, len(matched), matched, pil))
+                pix = page.get_pixmap(dpi=130, alpha=False)
+                img_bytes = pix.tobytes("png")
+                results.append((i+1, len(matched), matched, img_bytes))
         doc.close()
     except: pass
     return results
@@ -119,15 +118,14 @@ def get_allowed_files(customer_mail, is_admin):
             allowed.append(fname)
     return allowed
 
-# SESSION - MULTI SEARCH KEEPS
 if "customer_verified" not in st.session_state: st.session_state.customer_verified=False
 if "is_admin" not in st.session_state: st.session_state.is_admin=False
 if "customer_email" not in st.session_state: st.session_state.customer_email=""
 if "selected" not in st.session_state: st.session_state.selected=[]
 if "last_results" not in st.session_state: st.session_state.last_results=[]
 if "presentation_images" not in st.session_state: st.session_state.presentation_images={}
+if "page_num" not in st.session_state: st.session_state.page_num=1
 
-# LOGIN
 if not st.session_state.customer_verified and not st.session_state.is_admin:
     st.title("🛁 Pricelist Login")
     t1,t2=st.tabs(["Customer","Admin"])
@@ -147,7 +145,7 @@ if not st.session_state.customer_verified and not st.session_state.is_admin:
                 st.session_state.customer_verified=True
                 st.session_state.customer_email=mail
                 st.rerun()
-            else: st.error("Not found or pending approval")
+            else: st.error("Not found or pending")
         with st.form("signup"):
             st.write("New Signup - Admin gets 🔴 notification")
             n=st.text_input("Name*"); cont=st.text_input("Contact*"); m=st.text_input("Mail*"); city=st.text_input("City*"); pin=st.text_input("Pincode*")
@@ -155,10 +153,9 @@ if not st.session_state.customer_verified and not st.session_state.is_admin:
                 cust,sha=get_json_file("data/customers.json", [])
                 cust.append({"name":n,"contact":cont,"mail":m,"city":city,"pincode":pin,"company":"","approved":False})
                 save_json_file("data/customers.json", cust, sha, "new cust")
-                st.success("Submitted! Admin will see notification")
+                st.success("Submitted!")
     st.stop()
 
-# TOP BAR - NO OVERLAP
 st.title("Pricelist Search")
 top1, top2 = st.columns([3,1])
 with top1:
@@ -168,7 +165,6 @@ with top2:
     if st.button("Logout", use_container_width=True):
         st.session_state.customer_verified=False; st.session_state.is_admin=False; st.session_state.selected=[]; st.rerun()
 
-# SEARCH ROW - FIXED
 s1,s2,s3 = st.columns([1,2,1])
 with s1:
     brands_data,_=get_json_file("data/brands.json", DEFAULT_BRANDS)
@@ -179,7 +175,6 @@ with s3:
     st.write(""); st.write("")
     do_search = st.button("🔍 SEARCH ALL MATCHES", type="primary", use_container_width=True)
 
-# BASKET - MULTI SEARCH
 if st.session_state.selected:
     st.divider()
     st.markdown(f"### 🧺 Presentation Basket: **{len(st.session_state.selected)} sheets from multiple searches**")
@@ -188,8 +183,8 @@ if st.session_state.selected:
     for idx, (fname,pno) in enumerate(st.session_state.selected):
         b_col = b_cols[idx % 6]
         with b_col:
-            img = st.session_state.presentation_images.get(f"{fname}_{pno}")
-            if img: st.image(img, use_container_width=True)
+            img_bytes = st.session_state.presentation_images.get(f"{fname}_{pno}")
+            if img_bytes: st.image(img_bytes, use_container_width=True)
             st.caption(f"{fname} P{pno}")
             if st.button("❌ Remove", key=f"rem_{fname}_{pno}_{idx}"):
                 st.session_state.selected.remove((fname,pno))
@@ -209,13 +204,12 @@ if st.session_state.selected:
                 out=new_doc.tobytes()
                 new_doc.close()
                 st.download_button("📥 Download Presentation.pdf", data=out, file_name="Presentation.pdf", mime="application/pdf", use_container_width=True)
-                st.success("Presentation ready!")
+                st.success("Ready!")
             except Exception as e: st.error(f"{e}")
     with c2:
         if st.button("🗑️ Clear Basket", use_container_width=True):
             st.session_state.selected=[]; st.session_state.presentation_images={}; st.rerun()
 
-# SEARCH ALL
 if do_search:
     if not query.strip():
         st.warning("Type word")
@@ -236,8 +230,8 @@ if do_search:
             prog.progress((idx+1)/len(filtered))
         prog.empty()
         st.session_state.last_results=final
+        st.session_state.page_num=1
 
-# MAIN LAYOUT
 left, right = st.columns([1, 2.2])
 
 with left:
@@ -253,8 +247,8 @@ with left:
                     pdf_bytes=get_pdf_bytes(fname)
                     if pdf_bytes:
                         doc=fitz.open(stream=pdf_bytes, filetype="pdf")
-                        pil=Image.open(io.BytesIO(doc.load_page(0).get_pixmap(dpi=100).tobytes("png")))
-                        st.image(pil, use_container_width=True)
+                        img_bytes = doc.load_page(0).get_pixmap(dpi=100, alpha=False).tobytes("png")
+                        st.image(img_bytes, use_container_width=True)
                         doc.close()
             with c2:
                 pdf_bytes=get_pdf_bytes(fname)
@@ -269,7 +263,6 @@ with left:
         st.markdown(f"### Pending Customers approval: 🔴 {len(pending)} NEW")
     else:
         st.markdown("### Pending Customers approval:")
-
     for i,c in enumerate(cust_data):
         if not c.get("approved"):
             with st.container(border=True):
@@ -292,53 +285,57 @@ with left:
 
 with right:
     if not st.session_state.last_results:
-        st.info("Search shows ALL pages where ALL words match — 6 per page — If 3 results, 3 empty slots kept — Select to basket — Search again to add more")
+        st.info("Search shows ALL pages where ALL words match — 6 per page — If 3 results, 3 empty slots — Select to basket — Search again to add more — Use Next button for page 2")
     else:
         results=st.session_state.last_results
-        st.success(f"Found {len(results)} pages where ALL words match — Showing ALL — 6 per page")
+        st.success(f"Found {len(results)} pages where ALL words match — 6 per page")
 
-        # 6 PER PAGE + EMPTY BALANCE
         page_size=6
         total_pages=(len(results)+page_size-1)//page_size
+
         if total_pages>1:
-            pg=st.number_input(f"Page 1-{total_pages} (6 per page)", min_value=1, max_value=total_pages, value=1)
+            c_prev, c_info, c_next = st.columns([1,2,1])
+            with c_prev:
+                if st.button("⬅️ Previous", disabled=st.session_state.page_num==1, use_container_width=True):
+                    st.session_state.page_num -= 1
+                    st.rerun()
+            with c_info:
+                st.markdown(f"<div style='text-align:center; padding:10px; background:#1f2937; border-radius:8px;'><b>Page {st.session_state.page_num} / {total_pages} — Total {len(results)} found — 6 per page</b></div>", unsafe_allow_html=True)
+            with c_next:
+                if st.button("Next ➡️", disabled=st.session_state.page_num==total_pages, use_container_width=True, type="primary"):
+                    st.session_state.page_num += 1
+                    st.rerun()
+            pg = st.session_state.page_num
             start=(pg-1)*page_size
             display=results[start:start+page_size]
             st.caption(f"Showing {start+1}-{min(start+page_size, len(results))} of {len(results)}")
         else:
             pg=1
             display=results
+            st.caption(f"Showing all {len(results)} results")
 
         cols=st.columns(3)
         for idx in range(6):
             col=cols[idx % 3]
             with col:
                 if idx < len(display):
-                    fname, pno, mc, matched, pil_img = display[idx]
+                    fname, pno, mc, matched, img_bytes = display[idx]
                     with st.container(border=True):
-                        st.image(pil_img, use_container_width=True)
-                        st.caption(f"Page {pno} - {fname}")
+                        st.image(img_bytes, caption=f"Page {pno} - {fname}", use_container_width=True)
                         st.write(f"ALL {mc}: {', '.join(matched)}")
                         is_sel=(fname,pno) in st.session_state.selected
                         if st.checkbox("Add to Basket", key=f"chk_{fname}_{pno}_{idx}_{pg}", value=is_sel):
                             if (fname,pno) not in st.session_state.selected:
                                 st.session_state.selected.append((fname,pno))
-                                st.session_state.presentation_images[f"{fname}_{pno}"]=pil_img
+                                st.session_state.presentation_images[f"{fname}_{pno}"]=img_bytes
                         else:
                             if (fname,pno) in st.session_state.selected:
                                 st.session_state.selected.remove((fname,pno))
                                 st.session_state.presentation_images.pop(f"{fname}_{pno}", None)
                 else:
-                    # Empty slot - keep space
                     with st.container(border=True):
-                        st.write(" ")
-                        st.caption("Empty slot")
-                        st.write(" ")
-                        st.write(" ")
-                        st.write(" ")
-                        st.write(" ")
+                        st.write(" "); st.caption("Empty slot"); st.write(" "); st.write(" "); st.write(" ")
 
-# ADMIN
 if st.session_state.is_admin:
     st.divider()
     st.header("👑 Admin - File Access Control")
@@ -347,7 +344,8 @@ if st.session_state.is_admin:
         access_data, sha_acc = get_json_file("data/file_access.json", {})
         cust_data,_ = get_json_file("data/customers.json", [])
         mails=[c.get("mail") for c in cust_data if c.get("approved")]
-
+        if not mails:
+            st.warning("No approved customers yet — Approve in Pending above")
         for fname in get_all_pdfs():
             with st.container(border=True):
                 st.write(f"**{fname}** — Current: {', '.join(access_data.get(fname, ['all']))}")
@@ -357,6 +355,20 @@ if st.session_state.is_admin:
                     save_json_file("data/file_access.json", access_data, sha_acc, "access")
                     st.success(f"Saved {fname} -> {access_data[fname]}")
                     st.rerun()
+
+    with st.expander("🏷️ Create Brand - Add New Brand", expanded=True):
+        brands_list, sha_b = get_json_file("data/brands.json", DEFAULT_BRANDS)
+        st.write(f"Current Brands: {', '.join(brands_list)}")
+        new_b=st.text_input("New Brand Name (e.g. Fantini, Gessi)")
+        if st.button("➕ Create Brand", type="primary"):
+            if new_b.strip():
+                if new_b.strip() not in brands_list:
+                    brands_list.append(new_b.strip())
+                    save_json_file("data/brands.json", brands_list, sha_b, f"Add brand {new_b}")
+                    st.success(f"Brand '{new_b}' created!")
+                    st.rerun()
+                else: st.warning("Already exists")
+            else: st.warning("Enter brand name")
 
     with st.expander("📤 Upload Pricelists - ANY NAME", expanded=True):
         up_files=st.file_uploader("Choose PDFs", type=["pdf"], accept_multiple_files=True)

@@ -1,10 +1,9 @@
 import streamlit as st
 import base64, json, io
 import fitz
-from PIL import Image
 from github import Github
 
-st.set_page_config(page_title="Bathroom AI - STABLE FINAL", layout="wide")
+st.set_page_config(page_title="Bathroom AI - IMAGES 100% FIX", layout="wide")
 
 try:
     GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
@@ -35,7 +34,7 @@ def save_json_file(path, data, sha, msg):
         if sha: repo.update_file(path, msg, content, sha)
         else:
             try:
-                ex = repo.get_contents(path)
+                ex=repo.get_contents(path)
                 repo.update_file(path, msg, content, ex.sha)
             except: repo.create_file(path, msg, content)
         st.cache_data.clear()
@@ -89,23 +88,26 @@ def get_pdf_bytes_cached(fname):
         except: pass
     return None
 
+# ULTRA SIMPLE IMAGE - NO PIL - DIRECT PNG BYTES - WILL LOAD
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_page_image_cached(fname, page_no):
-    pb = get_pdf_bytes_cached(fname)
-    if not pb: return None
     try:
-        doc=fitz.open(stream=pb, filetype="pdf")
-        if page_no<1 or page_no>len(doc):
+        pb = get_pdf_bytes_cached(fname)
+        if not pb:
+            return None
+        doc = fitz.open(stream=pb, filetype="pdf")
+        if page_no <1 or page_no > len(doc):
             doc.close()
             return None
-        page=doc.load_page(page_no-1)
-        pix=page.get_pixmap(dpi=150, alpha=False)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        buf=io.BytesIO()
-        img.save(buf, format="PNG")
+        page = doc.load_page(page_no-1)
+        # LOW DPI 85 = FAST + NO MEMORY ERROR
+        pix = page.get_pixmap(dpi=85, alpha=False)
+        png_bytes = pix.tobytes("png")
         doc.close()
-        return buf.getvalue()
-    except:
+        return png_bytes
+    except Exception as e:
+        # Don't hide error
+        print(f"Image error {fname} p{page_no}: {e}")
         return None
 
 def search_fast(fname, query):
@@ -120,7 +122,7 @@ def search_fast(fname, query):
             txt=doc.load_page(i).get_text("text").lower()
             matched=[w for w in words if w in txt]
             if len(matched)==len(words):
-                res.append({"page": i+1, "count": len(matched), "words": matched})
+                res.append((i+1, len(matched), matched))
         doc.close()
     except: pass
     return res
@@ -144,7 +146,6 @@ if "last_results" not in st.session_state: st.session_state.last_results=[]
 if "presentation_images" not in st.session_state: st.session_state.presentation_images={}
 if "page_num" not in st.session_state: st.session_state.page_num=1
 
-# CLEAR OLD BAD FORMAT
 if st.session_state.last_results and len(st.session_state.last_results)>0:
     first=st.session_state.last_results[0]
     if isinstance(first,(list,tuple)) and len(first)==5:
@@ -189,20 +190,19 @@ with c2:
         st.session_state.customer_verified=False; st.session_state.is_admin=False; st.session_state.last_results=[]; st.session_state.selected=[]; st.session_state.page_num=1
         st.rerun()
 
-# FIXED KEYS - NO CLEARING
 s1,s2,s3=st.columns([1,2,1])
 with s1:
     brands,_=get_json_file("data/brands.json", DEFAULT_BRANDS)
     brand=st.selectbox("Brand", ["All Brands"]+brands, key="brand_select")
 with s2:
-    query=st.text_input("Search Pricelist", placeholder="mint spout", key="search_input") # KEY ADDED - FIXES Type word bug
+    query=st.text_input("Search Pricelist", placeholder="mint spout", key="search_input")
 with s3:
     st.write(""); st.write("")
     do_search=st.button("🔍 SEARCH ALL MATCHES", type="primary", use_container_width=True, key="search_btn")
 
 if st.session_state.selected:
     st.divider()
-    st.markdown(f"### 🧺 Basket: {len(st.session_state.selected)} sheets (multi-search)")
+    st.markdown(f"### 🧺 Basket: {len(st.session_state.selected)} sheets")
     cols=st.columns(min(6, len(st.session_state.selected)))
     for idx,(fn,pn) in enumerate(st.session_state.selected):
         with cols[idx%6]:
@@ -230,7 +230,7 @@ if st.session_state.selected:
         st.session_state.selected=[]; st.session_state.presentation_images={}; st.rerun()
 
 if do_search:
-    q = st.session_state.search_input # Use session state key
+    q = st.session_state.search_input
     if not q or not q.strip():
         st.warning("Type a word in Search Pricelist box")
     else:
@@ -243,16 +243,12 @@ if do_search:
         prog=st.progress(0)
         for idx,fn in enumerate(filt):
             pages=search_fast(fn, q)
-            for p in pages:
-                final.append((fn, p["page"], p["count"], p["words"]))
+            for pno, cnt, matched in pages:
+                final.append((fn, pno, cnt, matched))
             prog.progress((idx+1)/len(filt) if filt else 1)
         prog.empty()
         st.session_state.last_results=final
         st.session_state.page_num=1
-        if not final:
-            st.warning(f"No results for '{q}' in {brand}")
-        else:
-            st.success(f"Found {len(final)} pages for '{q}'")
         st.rerun()
 
 left,right=st.columns([1,2.2])
@@ -265,7 +261,10 @@ with left:
             with a:
                 if st.button("👁️ View", key=f"view_{fn}_left", use_container_width=True):
                     ib=get_page_image_cached(fn, 1)
-                    if ib: st.image(ib, use_container_width=True)
+                    if ib:
+                        st.image(ib, use_container_width=True)
+                    else:
+                        st.error("Failed to load preview - PDF bytes missing")
             with b:
                 pb=get_pdf_bytes_cached(fn)
                 if pb: st.download_button("📥 Download", data=pb, file_name=fn, mime="application/pdf", key=f"dl_{fn}_left", use_container_width=True)
@@ -288,10 +287,10 @@ with left:
 
 with right:
     if not st.session_state.last_results:
-        st.info("Search shows ALL — 6 per page — If 3 results, 3 empty slots — LIVE cached images — Images stay on Next/Previous")
+        st.info("Search shows ALL — 6 per page — If 3 results, 3 empty — Images cached")
     else:
         results=st.session_state.last_results
-        st.success(f"Found {len(results)} pages — 6 per page — Cached, will NOT disappear")
+        st.success(f"Found {len(results)} pages — 6 per page — Images cached")
 
         page_size=6
         total_pages=(len(results)+page_size-1)//page_size
@@ -302,7 +301,7 @@ with right:
                     st.session_state.page_num-=1
                     st.rerun()
             with ci:
-                st.markdown(f"<div style='text-align:center;padding:10px;background:#1f2937;border-radius:8px'><b>Page {st.session_state.page_num}/{total_pages} — Total {len(results)} found — 6 per page</b></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='text-align:center;padding:10px;background:#1f2937;border-radius:8px'><b>Page {st.session_state.page_num}/{total_pages} — Total {len(results)} — 6 per page</b></div>", unsafe_allow_html=True)
             with cn:
                 if st.button("Next ➡️", disabled=st.session_state.page_num==total_pages, use_container_width=True, type="primary", key="next_final2"):
                     st.session_state.page_num+=1
@@ -310,11 +309,10 @@ with right:
             pg=st.session_state.page_num
             start=(pg-1)*page_size
             display=results[start:start+page_size]
-            st.caption(f"Showing {start+1}-{min(start+page_size, len(results))} of {len(results)} — Click Next for Page 2")
+            st.caption(f"Showing {start+1}-{min(start+page_size, len(results))} of {len(results)}")
         else:
             pg=1
             display=results
-            st.caption(f"Showing all {len(results)}")
 
         cols=st.columns(3)
         for idx in range(6):
@@ -323,18 +321,31 @@ with right:
                 if idx < len(display):
                     fn,pn,mc,matched = display[idx]
                     with st.container(border=True):
-                        img=get_page_image_cached(fn, pn)
-                        if img:
-                            st.image(img, caption=f"Page {pn}", use_container_width=True)
+                        # DIRECT IMAGE LOAD
+                        img_bytes = get_page_image_cached(fn, pn)
+                        if img_bytes:
+                            st.image(img_bytes, use_container_width=True)
                         else:
-                            st.warning(f"Loading Page {pn}...")
+                            st.error(f"Image failed: Page {pn}")
+                            # Fallback: try again without cache
+                            pb = get_pdf_bytes_cached(fn)
+                            if pb:
+                                try:
+                                    doc=fitz.open(stream=pb, filetype="pdf")
+                                    pix=doc.load_page(pn-1).get_pixmap(dpi=80)
+                                    st.image(pix.tobytes("png"), use_container_width=True)
+                                    doc.close()
+                                except Exception as e:
+                                    st.write(f"Error: {e}")
+
+                        st.markdown(f"**Page {pn}**")
                         st.caption(f"{fn}")
                         st.write(f"ALL {mc}: {', '.join(matched)}")
                         is_sel=(fn,pn) in st.session_state.selected
                         if st.checkbox("Add to Basket", key=f"chk_{fn}_{pn}_{idx}_{pg}_{st.session_state.page_num}_cb", value=is_sel):
                             if (fn,pn) not in st.session_state.selected:
                                 st.session_state.selected.append((fn,pn))
-                                st.session_state.presentation_images[f"{fn}_{pn}"]=img
+                                st.session_state.presentation_images[f"{fn}_{pn}"]=img_bytes
                         else:
                             if (fn,pn) in st.session_state.selected:
                                 st.session_state.selected.remove((fn,pn))
@@ -366,7 +377,6 @@ if st.session_state.is_admin:
             if nb.strip() and nb.strip() not in blist:
                 blist.append(nb.strip())
                 save_json_file("data/brands.json", blist, sha_b, f"Add {nb}")
-                st.success(f"Created {nb}")
                 st.rerun()
     with st.expander("📤 Upload Pricelists", expanded=True):
         ups=st.file_uploader("Choose PDFs", type=["pdf"], accept_multiple_files=True, key="uploader")
